@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+
+logs/
+models/
+results/
+tb/
+
+*.xlsx
+*.npz
+events.out.tfevents.*
+*.log
+
