@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import csv
 import importlib.util
+import json
 import random
 import sys
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 
@@ -18,6 +20,7 @@ RESULT_DIR = Path("./results/td3_yearly_test")
 SUMMARY_CSV = RESULT_DIR / "daily_summary.csv"
 TIMESERIES_CSV = RESULT_DIR / "timeseries_detail.csv"
 TEST_EXPORT_XLSX = RESULT_DIR / "td3_test_export.xlsx"
+RUNTIME_SUMMARY_JSON = RESULT_DIR / "runtime_summary.json"
 
 SEED = 42
 VAL_DAYS_PER_MONTH = 2
@@ -563,6 +566,32 @@ def export_test_workbook(
     print(f"[export] Test diagnostics workbook saved to: {output_path.resolve()}")
 
 
+def write_runtime_summary(
+    path: Path,
+    *,
+    method: str,
+    n_days: int,
+    n_steps: int,
+    test_duration_seconds: float,
+) -> dict[str, Any]:
+    time_per_day = test_duration_seconds / n_days if n_days > 0 else 0.0
+    time_per_step = test_duration_seconds / n_steps if n_steps > 0 else 0.0
+    runtime_summary = {
+        "method": method,
+        "n_days": int(n_days),
+        "n_steps": int(n_steps),
+        "test_duration_seconds": round(float(test_duration_seconds), 6),
+        "time_per_day_seconds": round(float(time_per_day), 6),
+        "time_per_step_seconds": round(float(time_per_step), 6),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(runtime_summary, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return runtime_summary
+
+
 def main() -> None:
     configure_stdio()
 
@@ -620,6 +649,7 @@ def main() -> None:
     summary_rows: list[dict[str, Any]] = []
     step_rows: list[dict[str, Any]] = []
 
+    test_started_perf = perf_counter()
     for case_idx, case in enumerate(test_cases):
         ev_data = ev_provider(case)
         env = ParkIESEnv(cfg=cfg, ts_data=case.ts_data, ev_data=ev_data)
@@ -770,9 +800,17 @@ def main() -> None:
         )
 
     alert_rows = build_alert_rows(step_rows)
+    test_duration_seconds = max(perf_counter() - test_started_perf, 0.0)
 
     save_csv(summary_rows, SUMMARY_CSV, DAILY_SUMMARY_COLUMNS)
     save_csv(step_rows, TIMESERIES_CSV, STEP_DETAIL_COLUMNS)
+    runtime_summary = write_runtime_summary(
+        RUNTIME_SUMMARY_JSON,
+        method="TD3",
+        n_days=len(summary_rows),
+        n_steps=len(step_rows),
+        test_duration_seconds=test_duration_seconds,
+    )
 
     config_row = build_config_row(
         cfg,
@@ -878,6 +916,13 @@ def main() -> None:
 
     print(f"Test summary CSV saved to: {SUMMARY_CSV}")
     print(f"Timeseries detail CSV saved to: {TIMESERIES_CSV}")
+    print(f"Runtime summary JSON saved to: {RUNTIME_SUMMARY_JSON}")
+    print(
+        "Test runtime: "
+        f"{runtime_summary['test_duration_seconds']:.6f} s, "
+        f"{runtime_summary['time_per_day_seconds']:.6f} s/day, "
+        f"{runtime_summary['time_per_step_seconds']:.6f} s/step"
+    )
     print(f"Test export Excel saved to: {TEST_EXPORT_XLSX}")
     print(f"Alert rows exported: {len(alert_rows)}")
 

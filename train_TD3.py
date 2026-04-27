@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import random
 import sys
 from dataclasses import asdict
@@ -21,9 +22,11 @@ TB_DIR = Path("./tb/td3_yearly_single")
 RESULT_DIR = Path("./results/td3_yearly_training")
 TRAINING_EXPORT_XLSX = RESULT_DIR / "td3_training_export.xlsx"
 TRAINING_STEP_DETAIL_CSV = RESULT_DIR / "td3_training_step_detail.csv"
+TRAINING_RUNTIME_SUMMARY_JSON = RESULT_DIR / "training_runtime_summary.json"
 
 SEED = 42
-TOTAL_TIMESTEPS = 50000
+TOTAL_EPISODES = 4000
+TOTAL_TIMESTEPS = TOTAL_EPISODES * 24
 BUFFER_SIZE = 100000
 LEARNING_STARTS = 1_000
 BATCH_SIZE = 256
@@ -163,7 +166,7 @@ EPISODE_SUMMARY_COLUMNS = (
 CONFIG_COLUMNS = (
     "run_id", "timestamp_start", "yearly_csv_path", "yearly_ev_path", "n_train_cases", "n_val_cases", "n_test_cases",
     "training_duration_seconds", "training_duration_hms",
-    "TOTAL_TIMESTEPS", "SEED", "BUFFER_SIZE", "LEARNING_STARTS", "BATCH_SIZE", "LEARNING_RATE", "TAU", "POLICY_DELAY",
+    "TOTAL_EPISODES", "TOTAL_TIMESTEPS", "SEED", "BUFFER_SIZE", "LEARNING_STARTS", "BATCH_SIZE", "LEARNING_RATE", "TAU", "POLICY_DELAY",
     "TRAIN_FREQ", "GRADIENT_STEPS", "EVAL_FREQ", "SAVE_FREQ", "VAL_DAYS_PER_MONTH", "REWARD_SCALE",
     "policy", "net_arch_pi", "net_arch_qf", "activation_fn", "device",
     "episode_length", "dt", "future_horizon", "exogenous_future_horizon", "grid_import_max", "grid_export_max",
@@ -214,6 +217,8 @@ def preflight_check() -> str:
 def infer_unit(column_name: str) -> str:
     if column_name in {"global_step", "global_step_start", "global_step_end", "TOTAL_TIMESTEPS", "EVAL_FREQ", "SAVE_FREQ", "LEARNING_STARTS"}:
         return "step"
+    if column_name == "TOTAL_EPISODES":
+        return "episode"
     if column_name in {"episode_idx", "time_step", "SEED", "BUFFER_SIZE", "BATCH_SIZE", "POLICY_DELAY", "TRAIN_FREQ", "GRADIENT_STEPS", "VAL_DAYS_PER_MONTH", "episode_length", "n_train_cases", "n_val_cases", "n_test_cases"} or column_name.endswith("_count") or column_name.endswith("_steps"):
         return "count"
     if column_name in {"month", "day_of_year"}:
@@ -324,13 +329,38 @@ def format_duration(seconds: float | None) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def write_training_runtime_summary(
+    path: Path,
+    *,
+    method: str,
+    total_episodes: int | None = None,
+    total_timesteps: int,
+    training_duration_seconds: float | None,
+    device: str,
+    seed: int,
+) -> dict[str, Any]:
+    duration = float(training_duration_seconds or 0.0)
+    row = {
+        "method": method,
+        "total_episodes": int(total_episodes) if total_episodes is not None else None,
+        "total_timesteps": int(total_timesteps),
+        "training_duration_seconds": round(duration, 6),
+        "training_duration_hms": format_duration(duration),
+        "device": str(device),
+        "seed": int(seed),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(row, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return row
+
+
 def build_config_row(cfg: Any, *, run_id: str, timestamp_start: str, n_train_cases: int, n_val_cases: int, n_test_cases: int, device: str) -> dict[str, Any]:
     cfg_values = asdict(cfg)
     return {
         "run_id": run_id, "timestamp_start": timestamp_start, "yearly_csv_path": str(YEARLY_CSV_PATH), "yearly_ev_path": str(YEARLY_EV_PATH),
         "n_train_cases": int(n_train_cases), "n_val_cases": int(n_val_cases), "n_test_cases": int(n_test_cases),
         "training_duration_seconds": None, "training_duration_hms": "",
-        "TOTAL_TIMESTEPS": TOTAL_TIMESTEPS, "SEED": SEED, "BUFFER_SIZE": BUFFER_SIZE, "LEARNING_STARTS": LEARNING_STARTS, "BATCH_SIZE": BATCH_SIZE,
+        "TOTAL_EPISODES": TOTAL_EPISODES, "TOTAL_TIMESTEPS": TOTAL_TIMESTEPS, "SEED": SEED, "BUFFER_SIZE": BUFFER_SIZE, "LEARNING_STARTS": LEARNING_STARTS, "BATCH_SIZE": BATCH_SIZE,
         "LEARNING_RATE": LEARNING_RATE, "TAU": TAU, "POLICY_DELAY": POLICY_DELAY, "TRAIN_FREQ": TRAIN_FREQ, "GRADIENT_STEPS": GRADIENT_STEPS,
         "EVAL_FREQ": EVAL_FREQ, "SAVE_FREQ": SAVE_FREQ, "VAL_DAYS_PER_MONTH": VAL_DAYS_PER_MONTH, "REWARD_SCALE": REWARD_SCALE,
         "policy": POLICY_NAME, "net_arch_pi": str(POLICY_NET_ARCH_PI), "net_arch_qf": str(POLICY_NET_ARCH_QF), "activation_fn": ACTIVATION_FN_NAME, "device": device,
@@ -562,6 +592,7 @@ def main() -> None:
     probe_env = ParkIESEnv(cfg=cfg, ts_data=probe_case.ts_data, ev_data=probe_ev_data)
     print("[startup] 本次训练关键配置 TD3:")
     print(f"  reward_scale = {cfg.reward_scale}")
+    print(f"  total_episodes = {TOTAL_EPISODES}")
     print(f"  total_timesteps = {TOTAL_TIMESTEPS}")
     print(f"  buffer_size = {BUFFER_SIZE}")
     print(f"  learning_starts = {LEARNING_STARTS}")
@@ -641,6 +672,21 @@ def main() -> None:
         )
     print(f"训练 step_detail CSV 已导出到: {TRAINING_STEP_DETAIL_CSV.resolve()}")
     print(f"训练诊断 Excel 已导出到: {TRAINING_EXPORT_XLSX.resolve()}")
+    runtime_row = write_training_runtime_summary(
+        TRAINING_RUNTIME_SUMMARY_JSON,
+        method="TD3",
+        total_episodes=TOTAL_EPISODES,
+        total_timesteps=TOTAL_TIMESTEPS,
+        training_duration_seconds=getattr(training_export_callback, "training_duration_seconds", None),
+        device=str(model.device),
+        seed=SEED,
+    )
+    print(f"训练耗时摘要 JSON 已导出到: {TRAINING_RUNTIME_SUMMARY_JSON.resolve()}")
+    print(
+        "TD3 training_runtime_summary: "
+        f"{runtime_row['training_duration_hms']} "
+        f"({runtime_row['training_duration_seconds']:.6f} s)"
+    )
     best_model_path = BEST_MODEL_DIR / "best_model.zip"
     if best_model_path.exists():
         print(f"TD3 当前最佳模型路径: {best_model_path}")

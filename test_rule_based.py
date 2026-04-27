@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import random
 import sys
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from test_TD3 import (
@@ -31,6 +33,7 @@ DEFAULT_OUTPUT_DIR = Path("./results/rule_based_v2g_test")
 DEFAULT_TD3_SUMMARY_CSV = Path("./results/td3_yearly_test/daily_summary.csv")
 SUMMARY_FILENAME = "daily_summary.csv"
 TIMESERIES_FILENAME = "timeseries_detail.csv"
+RUNTIME_SUMMARY_FILENAME = "runtime_summary.json"
 DIAGNOSTICS_FILENAME = "rule_based_diagnostics.md"
 EXCEL_FILENAME = "rule_based_test_export.xlsx"
 COMPARISON_FILENAME = "rule_based_vs_td3_summary.csv"
@@ -683,6 +686,32 @@ def write_diagnostics_report(
     print(f"[export] Diagnostics report saved to: {path}")
 
 
+def write_runtime_summary(
+    path: Path,
+    *,
+    method: str,
+    n_days: int,
+    n_steps: int,
+    test_duration_seconds: float,
+) -> dict[str, Any]:
+    time_per_day = test_duration_seconds / n_days if n_days > 0 else 0.0
+    time_per_step = test_duration_seconds / n_steps if n_steps > 0 else 0.0
+    runtime_summary = {
+        "method": method,
+        "n_days": int(n_days),
+        "n_steps": int(n_steps),
+        "test_duration_seconds": round(float(test_duration_seconds), 6),
+        "time_per_day_seconds": round(float(time_per_day), 6),
+        "time_per_step_seconds": round(float(time_per_step), 6),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(runtime_summary, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return runtime_summary
+
+
 def main() -> None:
     configure_stdio()
     args = build_arg_parser().parse_args()
@@ -707,6 +736,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     summary_csv = output_dir / SUMMARY_FILENAME
     timeseries_csv = output_dir / TIMESERIES_FILENAME
+    runtime_summary_json = output_dir / RUNTIME_SUMMARY_FILENAME
     diagnostics_md = output_dir / DIAGNOSTICS_FILENAME
     excel_path = output_dir / EXCEL_FILENAME
 
@@ -742,6 +772,7 @@ def main() -> None:
     summary_rows: list[dict[str, Any]] = []
     step_rows: list[dict[str, Any]] = []
 
+    test_started_perf = perf_counter()
     for case_idx, case in enumerate(test_cases):
         env = ParkIESEnv(
             cfg=cfg,
@@ -773,11 +804,20 @@ def main() -> None:
         )
 
     alert_rows = build_alert_rows(step_rows)
+    test_duration_seconds = max(perf_counter() - test_started_perf, 0.0)
 
     save_csv(summary_rows, summary_csv, DAILY_SUMMARY_COLUMNS)
     save_csv(step_rows, timeseries_csv, STEP_DETAIL_COLUMNS)
+    runtime_summary = write_runtime_summary(
+        runtime_summary_json,
+        method=method_label(args.ev_mode),
+        n_days=len(summary_rows),
+        n_steps=len(step_rows),
+        test_duration_seconds=test_duration_seconds,
+    )
     print(f"[export] Daily summary CSV saved to: {summary_csv}")
     print(f"[export] Timeseries detail CSV saved to: {timeseries_csv}")
+    print(f"[export] Runtime summary JSON saved to: {runtime_summary_json}")
 
     summary_df = pd.DataFrame(summary_rows, columns=DAILY_SUMMARY_COLUMNS)
     timeseries_df = pd.DataFrame(step_rows, columns=STEP_DETAIL_COLUMNS)
@@ -828,6 +868,12 @@ def main() -> None:
     print(f"Method: {method_label(args.ev_mode)}")
     print(f"Test days: {len(summary_rows)}")
     print(f"Timeseries rows: {len(step_rows)}")
+    print(
+        "Test runtime: "
+        f"{runtime_summary['test_duration_seconds']:.6f} s, "
+        f"{runtime_summary['time_per_day_seconds']:.6f} s/day, "
+        f"{runtime_summary['time_per_step_seconds']:.6f} s/step"
+    )
     print(f"Total system cost: {safe_sum(pd, summary_df, 'total_system_cost'):.4f}")
     print(f"Total penalties: {safe_sum(pd, summary_df, 'total_penalties'):.4f}")
     print(

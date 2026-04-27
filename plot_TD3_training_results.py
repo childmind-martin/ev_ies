@@ -27,7 +27,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_TB_LOG_DIR = BASE_DIR / "tb" / "td3_yearly_single"
 DEFAULT_EVAL_NPZ_PATH = BASE_DIR / "logs" / "td3_yearly_single" / "evaluations.npz"
 DEFAULT_TRAINING_XLSX_PATH = BASE_DIR / "results" / "td3_yearly_training" / "td3_training_export.xlsx"
-DEFAULT_OUTPUT_DIR = BASE_DIR / "results" / "td3_training_plots"
+DEFAULT_OUTPUT_DIR = BASE_DIR / "results" / "td3_yearly_training" / "plots"
 
 TIMESTEP_SCALE = 1e4
 TRAIN_REWARD_SMOOTH_WINDOW = 100
