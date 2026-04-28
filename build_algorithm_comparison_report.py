@@ -46,6 +46,12 @@ OUTPUT_DIR = BASE_DIR / "results" / "comparison"
 N_EXCHANGE_BINS = 40
 PNG_DPI = 300
 EPS = 1e-9
+METHOD_COLORS = {
+    "Rule-based-V2G": "#7F7F7F",
+    "PPO": "#4E79A7",
+    "TD3": "#F28E2B",
+    "LSTM-TD3": "#59A14F",
+}
 
 ECONOMIC_COST_COLUMNS = [
     "total_cost_grid",
@@ -105,6 +111,22 @@ PERFORMANCE_OUTPUT_COLUMNS = [
     "time_per_step_seconds",
 ]
 
+VALIDATION_REWARD_OUTPUT_COLUMNS = [
+    "method",
+    "eval_timestep",
+    "validation_mean_reward",
+    "validation_std_reward",
+    "n_eval_episodes",
+]
+
+VALIDATION_REWARD_NOTE = (
+    "NOTE: Validation reward is computed from SB3 EvalCallback evaluations.npz:\n"
+    "validation_mean_reward = mean(results, axis=1)\n"
+    "validation_std_reward = std(results, axis=1)\n"
+    "It is not SB3 rollout/ep_rew_mean and should not be mixed with training "
+    "episode_reward_scaled."
+)
+
 
 @dataclass(frozen=True)
 class MethodConfig:
@@ -113,12 +135,14 @@ class MethodConfig:
     training_dir: Path | None = None
     training_export_xlsx: Path | None = None
     training_episode_csv: Path | None = None
+    eval_npz_path: Path | None = None
 
 
 METHODS = [
     MethodConfig(
         method="Rule-based-V2G",
         test_dir=BASE_DIR / "results" / "rule_based_v2g_test",
+        eval_npz_path=None,
     ),
     MethodConfig(
         method="PPO",
@@ -126,6 +150,7 @@ METHODS = [
         training_dir=BASE_DIR / "results" / "ppo_sb3_direct_training",
         training_export_xlsx=BASE_DIR / "results" / "ppo_sb3_direct_training" / "ppo_sb3_direct_training_export.xlsx",
         training_episode_csv=BASE_DIR / "results" / "ppo_sb3_direct_training" / "episode_summary.csv",
+        eval_npz_path=BASE_DIR / "logs" / "ppo_sb3_direct" / "evaluations.npz",
     ),
     MethodConfig(
         method="TD3",
@@ -133,6 +158,7 @@ METHODS = [
         training_dir=BASE_DIR / "results" / "td3_yearly_training",
         training_export_xlsx=BASE_DIR / "results" / "td3_yearly_training" / "td3_training_export.xlsx",
         training_episode_csv=BASE_DIR / "results" / "td3_yearly_training" / "episode_summary.csv",
+        eval_npz_path=BASE_DIR / "logs" / "td3_yearly_single" / "evaluations.npz",
     ),
     MethodConfig(
         method="LSTM-TD3",
@@ -140,6 +166,7 @@ METHODS = [
         training_dir=BASE_DIR / "results" / "lstm_td3_yearly_training",
         training_export_xlsx=BASE_DIR / "results" / "lstm_td3_yearly_training" / "lstm_td3_training_export.xlsx",
         training_episode_csv=BASE_DIR / "results" / "lstm_td3_yearly_training" / "episode_summary.csv",
+        eval_npz_path=BASE_DIR / "logs" / "lstm_td3_yearly_single" / "evaluations.npz",
     ),
 ]
 
@@ -154,7 +181,10 @@ class WarningLog:
         print(text, file=sys.stderr)
 
     def write(self, path: Path) -> None:
-        path.write_text("\n".join(self.messages) + ("\n" if self.messages else ""), encoding="utf-8")
+        content = VALIDATION_REWARD_NOTE
+        if self.messages:
+            content += "\n\n" + "\n".join(self.messages)
+        path.write_text(content + "\n", encoding="utf-8")
 
 
 def read_json(path: Path, warning_log: WarningLog, *, label: str) -> dict[str, Any]:
@@ -166,6 +196,13 @@ def read_json(path: Path, warning_log: WarningLog, *, label: str) -> dict[str, A
     except Exception as exc:
         warning_log.warn(f"Failed to read {label}: {path} ({exc})")
         return {}
+
+
+def display_path(path: Path) -> str:
+    try:
+        return path.relative_to(BASE_DIR).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def numeric(df: pd.DataFrame, column: str) -> pd.Series:
@@ -557,7 +594,13 @@ def plot_exchange_distribution(
     plt.close(fig)
 
 
-def load_training_reward_curve(config: MethodConfig, warning_log: WarningLog) -> pd.DataFrame:
+def load_training_episode_curve(
+    config: MethodConfig,
+    warning_log: WarningLog,
+    metric_columns: tuple[str, ...],
+    *,
+    source_label: str,
+) -> pd.DataFrame:
     if config.method == "Rule-based-V2G" or config.training_dir is None:
         return pd.DataFrame()
 
@@ -576,25 +619,102 @@ def load_training_reward_curve(config: MethodConfig, warning_log: WarningLog) ->
             else:
                 df = pd.read_csv(path)
         except Exception as exc:
-            warning_log.warn(f"Failed to read {config.method} training rewards from {path}: {exc}")
+            warning_log.warn(f"Failed to read {config.method} {source_label} from {path}: {exc}")
             continue
 
-        missing = [column for column in ("episode_reward_scaled",) if column not in df.columns]
+        missing = [column for column in metric_columns if column not in df.columns]
         if missing:
-            warning_log.warn(f"{config.method} training reward file missing columns {missing}: {path}")
+            warning_log.warn(f"{config.method} {source_label} file missing columns {missing}: {path}")
             continue
 
-        out = df[["episode_reward_scaled"]].copy()
+        out = df[list(metric_columns)].copy()
         if "episode_idx" in df.columns:
             out["episode_number"] = pd.to_numeric(df["episode_idx"], errors="coerce") + 1
         else:
             out["episode_number"] = np.arange(1, len(out) + 1, dtype=np.int64)
         out["method"] = config.method
-        out["episode_reward_scaled"] = pd.to_numeric(out["episode_reward_scaled"], errors="coerce")
-        return out.dropna(subset=["episode_number", "episode_reward_scaled"])
+        for column in metric_columns:
+            out[column] = pd.to_numeric(out[column], errors="coerce")
+        return out.dropna(subset=["episode_number", *metric_columns])
 
-    warning_log.warn(f"{config.method} training reward file not found under {config.training_dir}")
+    warning_log.warn(f"{config.method} {source_label} file not found under {config.training_dir}")
     return pd.DataFrame()
+
+
+def load_training_reward_curve(config: MethodConfig, warning_log: WarningLog) -> pd.DataFrame:
+    return load_training_episode_curve(
+        config,
+        warning_log,
+        ("episode_reward_scaled",),
+        source_label="training reward",
+    )
+
+
+def load_training_process_curve(config: MethodConfig, warning_log: WarningLog) -> pd.DataFrame:
+    return load_training_episode_curve(
+        config,
+        warning_log,
+        ("episode_system_cost", "episode_penalty_cost"),
+        source_label="training process",
+    )
+
+
+def load_validation_reward_curve(config: MethodConfig, warning_log: WarningLog) -> pd.DataFrame:
+    if config.eval_npz_path is None:
+        return pd.DataFrame(columns=VALIDATION_REWARD_OUTPUT_COLUMNS)
+
+    path = config.eval_npz_path
+    if not path.exists():
+        warning_log.warn(
+            f"{config.method} evaluations.npz not found at {display_path(path)}, "
+            "validation reward skipped."
+        )
+        return pd.DataFrame(columns=VALIDATION_REWARD_OUTPUT_COLUMNS)
+
+    try:
+        with np.load(path) as data:
+            if "timesteps" not in data or "results" not in data:
+                warning_log.warn(
+                    f"{config.method} evaluations.npz missing timesteps or results at "
+                    f"{display_path(path)}, validation reward skipped."
+                )
+                return pd.DataFrame(columns=VALIDATION_REWARD_OUTPUT_COLUMNS)
+            timesteps = np.asarray(data["timesteps"], dtype=np.int64)
+            results = np.asarray(data["results"], dtype=np.float64)
+    except Exception as exc:
+        warning_log.warn(
+            f"Failed to read {config.method} evaluations.npz at {display_path(path)}: "
+            f"{exc}; validation reward skipped."
+        )
+        return pd.DataFrame(columns=VALIDATION_REWARD_OUTPUT_COLUMNS)
+
+    if results.ndim != 2:
+        warning_log.warn(
+            f"{config.method} evaluations.npz results must be 2D, got shape "
+            f"{results.shape}; validation reward skipped."
+        )
+        return pd.DataFrame(columns=VALIDATION_REWARD_OUTPUT_COLUMNS)
+    if len(timesteps) != results.shape[0]:
+        warning_log.warn(
+            f"{config.method} evaluations.npz timesteps length {len(timesteps)} does "
+            f"not match results rows {results.shape[0]}; validation reward skipped."
+        )
+        return pd.DataFrame(columns=VALIDATION_REWARD_OUTPUT_COLUMNS)
+
+    validation_mean_reward = np.mean(results, axis=1)
+    validation_std_reward = np.std(results, axis=1)
+    out = pd.DataFrame(
+        {
+            "method": config.method,
+            "eval_timestep": timesteps,
+            "validation_mean_reward": validation_mean_reward,
+            "validation_std_reward": validation_std_reward,
+            "n_eval_episodes": int(results.shape[1]),
+        }
+    )
+    return out.dropna(subset=["eval_timestep", "validation_mean_reward"]).reindex(
+        columns=VALIDATION_REWARD_OUTPUT_COLUMNS
+    )
 
 
 def plot_training_rewards(configs: list[MethodConfig], path: Path, warning_log: WarningLog) -> None:
@@ -624,6 +744,102 @@ def plot_training_rewards(configs: list[MethodConfig], path: Path, warning_log: 
     plt.close(fig)
 
 
+def draw_no_data(ax: plt.Axes, title: str, xlabel: str, ylabel: str, message: str) -> None:
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.text(0.5, 0.5, message, ha="center", va="center", transform=ax.transAxes)
+    ax.grid(True, alpha=0.15)
+
+
+def plot_training_process_comparison(
+    configs: list[MethodConfig],
+    validation_df: pd.DataFrame,
+    path: Path,
+    warning_log: WarningLog,
+) -> None:
+    training_curves = [load_training_process_curve(config, warning_log) for config in configs]
+    training_curves = [curve for curve in training_curves if not curve.empty]
+
+    if not training_curves and validation_df.empty:
+        save_placeholder_figure(
+            path,
+            "Training Process Comparison",
+            "No training process or validation reward data available.",
+        )
+        return
+
+    fig, axes = plt.subplots(1, 3, figsize=(17.0, 5.2))
+    process_specs = [
+        (axes[0], "episode_system_cost", "(a) Episode system cost", "episode", "system cost"),
+        (axes[1], "episode_penalty_cost", "(b) Episode penalty cost", "episode", "penalty cost"),
+    ]
+
+    for ax, column, title, xlabel, ylabel in process_specs:
+        plotted = False
+        for curve in training_curves:
+            curve = curve.sort_values("episode_number")
+            method = str(curve["method"].iloc[0])
+            ax.plot(
+                curve["episode_number"].to_numpy(dtype=float),
+                curve[column].to_numpy(dtype=float),
+                linewidth=1.2,
+                label=method,
+                color=METHOD_COLORS.get(method),
+            )
+            plotted = True
+        if plotted:
+            ax.set_title(title)
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(ylabel)
+            ax.grid(True, alpha=0.25)
+            ax.legend()
+        else:
+            draw_no_data(ax, title, xlabel, ylabel, "No training episode data")
+
+    ax = axes[2]
+    if validation_df.empty:
+        draw_no_data(ax, "(c) Validation reward", "timestep", "mean validation reward", "No validation reward data")
+    else:
+        for config in configs:
+            if config.eval_npz_path is None:
+                continue
+            method_df = validation_df[validation_df["method"] == config.method]
+            if method_df.empty:
+                continue
+            method_df = method_df.sort_values("eval_timestep")
+            x = pd.to_numeric(method_df["eval_timestep"], errors="coerce").to_numpy(dtype=float)
+            y = pd.to_numeric(method_df["validation_mean_reward"], errors="coerce").to_numpy(dtype=float)
+            std = pd.to_numeric(method_df.get("validation_std_reward"), errors="coerce").to_numpy(dtype=float)
+            valid = np.isfinite(x) & np.isfinite(y)
+            if not np.any(valid):
+                continue
+            x = x[valid]
+            y = y[valid]
+            std = std[valid] if len(std) == len(valid) else np.full_like(y, np.nan)
+            color = METHOD_COLORS.get(config.method)
+            ax.plot(x, y, linewidth=1.8, label=config.method, color=color)
+            std_valid = np.isfinite(std)
+            if np.any(std_valid):
+                ax.fill_between(
+                    x[std_valid],
+                    y[std_valid] - std[std_valid],
+                    y[std_valid] + std[std_valid],
+                    color=color,
+                    alpha=0.16,
+                    linewidth=0,
+                )
+        ax.set_title("(c) Validation reward")
+        ax.set_xlabel("timestep")
+        ax.set_ylabel("mean validation reward")
+        ax.grid(True, alpha=0.25)
+        ax.legend()
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=PNG_DPI, bbox_inches="tight")
+    plt.close(fig)
+
+
 def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     warning_log = WarningLog()
@@ -638,11 +854,21 @@ def main() -> None:
     penalty_df = build_penalty_breakdown(loaded)
     performance_df = build_performance_summary(loaded)
     exchange_df, method_values, exchange_bins = build_exchange_distribution(loaded, warning_log)
+    validation_curves = [load_validation_reward_curve(config, warning_log) for config in METHODS]
+    validation_curves = [curve for curve in validation_curves if not curve.empty]
+    if validation_curves:
+        validation_df = pd.concat(validation_curves, ignore_index=True).reindex(
+            columns=VALIDATION_REWARD_OUTPUT_COLUMNS
+        )
+    else:
+        warning_log.warn("No validation reward data found; validation_reward_summary.csv will be empty.")
+        validation_df = pd.DataFrame(columns=VALIDATION_REWARD_OUTPUT_COLUMNS)
 
     economic_df.to_csv(OUTPUT_DIR / "algorithm_economic_summary.csv", index=False, encoding="utf-8-sig")
     penalty_df.to_csv(OUTPUT_DIR / "algorithm_penalty_breakdown.csv", index=False, encoding="utf-8-sig")
     performance_df.to_csv(OUTPUT_DIR / "algorithm_performance_summary.csv", index=False, encoding="utf-8-sig")
     exchange_df.to_csv(OUTPUT_DIR / "ev_ies_exchange_distribution.csv", index=False, encoding="utf-8-sig")
+    validation_df.to_csv(OUTPUT_DIR / "validation_reward_summary.csv", index=False, encoding="utf-8-sig")
 
     plot_cost_breakdown(economic_df, OUTPUT_DIR / "fig_cost_breakdown.png")
     plot_penalty_breakdown(penalty_df, OUTPUT_DIR / "fig_penalty_breakdown.png")
@@ -650,6 +876,12 @@ def main() -> None:
         plot_penalty_breakdown(penalty_df, OUTPUT_DIR / "fig_penalty_breakdown_log.png", log_scale=True)
     plot_exchange_distribution(method_values, exchange_bins, OUTPUT_DIR / "fig_ev_ies_exchange_distribution.png")
     plot_training_rewards(METHODS, OUTPUT_DIR / "fig_training_rewards.png", warning_log)
+    plot_training_process_comparison(
+        METHODS,
+        validation_df,
+        OUTPUT_DIR / "fig_training_process_comparison.png",
+        warning_log,
+    )
 
     warning_log.write(OUTPUT_DIR / "comparison_warnings.txt")
 
