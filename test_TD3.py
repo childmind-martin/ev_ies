@@ -66,7 +66,7 @@ DAILY_SUMMARY_COLUMNS = (
     "total_penalty_unserved_e", "total_penalty_unserved_h", "total_penalty_unserved_c",
     "total_penalty_depart_energy", "total_penalty_depart_energy_soft", "total_penalty_depart_energy_mid", "total_penalty_depart_energy_hard",
     "total_penalty_depart_risk", "total_penalty_surplus_e", "total_penalty_surplus_h", "total_penalty_surplus_c",
-    "total_penalty_export_e", "total_penalty_ev_export_guard",
+    "total_penalty_export_e", "total_penalty_ev_export_guard", "total_penalty_terminal_ees_soc",
     "total_depart_energy_shortage_kwh", "total_depart_shortage_soft_kwh", "total_depart_shortage_mid_kwh", "total_depart_shortage_hard_kwh",
     "total_depart_risk_energy_kwh",
     "total_reward_storage_discharge_bonus", "total_reward_storage_charge_bonus", "total_reward_ev_target_timing_bonus",
@@ -75,7 +75,8 @@ DAILY_SUMMARY_COLUMNS = (
     "total_gt_export_clip", "total_gt_export_clip_steps", "total_gt_safe_infeasible_steps",
     "total_grid_buy_kwh", "total_grid_sell_kwh",
     "avg_p_gt_kw", "avg_p_ev_ch_kw", "avg_p_ev_dis_kw", "avg_p_ees_ch_kw", "avg_p_ees_dis_kw",
-    "ees_soc_episode_init", "final_ees_soc", "final_gt_power",
+    "ees_soc_episode_init", "final_ees_soc", "ees_soc_init", "terminal_ees_required_soc",
+    "terminal_ees_shortage_kwh", "ees_terminal_soc_feasible", "final_gt_power",
 )
 
 CONFIG_COLUMNS = (
@@ -93,7 +94,8 @@ CONFIG_COLUMNS = (
     "penalty_unserved_e", "penalty_unserved_h", "penalty_unserved_c", "penalty_depart_soc",
     "penalty_depart_energy_soft", "penalty_depart_energy_mid", "penalty_ev_depart_risk",
     "penalty_surplus_e", "penalty_surplus_h", "penalty_surplus_c",
-    "penalty_export_e", "penalty_ev_export_guard",
+    "penalty_export_e", "penalty_ev_export_guard", "penalty_ees_terminal_soc",
+    "ees_terminal_soc_tolerance",
     "ev_discharge_price_threshold", "ev_charge_price_threshold", "ev_peak_export_tolerance_kw",
     "reward_storage_discharge_base", "reward_storage_charge_base", "reward_ev_target_timing_base",
     "ees_reward_discharge_soc_floor", "ees_reward_charge_soc_target", "reward_scale",
@@ -262,7 +264,8 @@ def infer_unit(column_name: str) -> str:
     if column_name.endswith("_path"):
         return "path"
     if column_name.startswith("has_") or column_name in {
-        "terminated", "truncated", "gt_low_price_active", "gt_thermal_feasible", "gt_electric_feasible", "gt_safe_feasible"
+        "terminated", "truncated", "gt_low_price_active", "gt_thermal_feasible",
+        "gt_electric_feasible", "gt_safe_feasible", "ees_terminal_soc_feasible"
     }:
         return "bool"
     if column_name in {
@@ -422,6 +425,7 @@ def build_config_row(
         "ees_soc_init": cfg_values["ees_soc_init"],
         "ees_soc_min": cfg_values["ees_soc_min"],
         "ees_soc_max": cfg_values["ees_soc_max"],
+        "ees_terminal_soc_tolerance": cfg_values["ees_terminal_soc_tolerance"],
         "penalty_unserved_e": cfg_values["penalty_unserved_e"],
         "penalty_unserved_h": cfg_values["penalty_unserved_h"],
         "penalty_unserved_c": cfg_values["penalty_unserved_c"],
@@ -434,6 +438,7 @@ def build_config_row(
         "penalty_surplus_c": cfg_values["penalty_surplus_c"],
         "penalty_export_e": cfg_values["penalty_export_e"],
         "penalty_ev_export_guard": cfg_values["penalty_ev_export_guard"],
+        "penalty_ees_terminal_soc": cfg_values["penalty_ees_terminal_soc"],
         "ev_discharge_price_threshold": cfg_values["ev_discharge_price_threshold"],
         "ev_charge_price_threshold": cfg_values["ev_charge_price_threshold"],
         "ev_peak_export_tolerance_kw": cfg_values["ev_peak_export_tolerance_kw"],
@@ -687,6 +692,7 @@ def main() -> None:
         total_penalty_surplus_e = float(sum(item.get("penalty_surplus_e", 0.0) for item in infos))
         total_penalty_export_e = float(sum(item.get("penalty_export_e", 0.0) for item in infos))
         total_penalty_ev_export_guard = float(sum(item.get("penalty_ev_export_guard", 0.0) for item in infos))
+        total_penalty_terminal_ees_soc = 0.0
         total_penalty_surplus_h = float(sum(item.get("penalty_surplus_h", 0.0) for item in infos))
         total_penalty_surplus_c = float(sum(item.get("penalty_surplus_c", 0.0) for item in infos))
         total_reward_storage_discharge_bonus = float(sum(item.get("reward_storage_discharge_bonus", 0.0) for item in infos))
@@ -711,8 +717,22 @@ def main() -> None:
         avg_p_ees_ch = float(sum(item.get("p_ees_ch", 0.0) for item in infos) / max(len(infos), 1))
         avg_p_ees_dis = float(sum(item.get("p_ees_dis", 0.0) for item in infos) / max(len(infos), 1))
 
-        final_ees_soc = float(infos[-1].get("ees_soc", 0.0)) if infos else 0.0
+        final_info = infos[-1] if infos else {}
+        final_ees_soc = float(final_info.get("final_ees_soc", final_info.get("ees_soc", 0.0)))
+        ees_soc_init = float(final_info.get("ees_soc_init", final_info.get("ees_soc_episode_init", 0.0)))
+        terminal_ees_required_soc = float(final_info.get("terminal_ees_required_soc", 0.0))
+        terminal_ees_shortage_kwh = float(final_info.get("episode_terminal_ees_shortage_kwh", 0.0))
+        total_penalty_terminal_ees_soc = float(final_info.get("episode_penalty_terminal_ees_soc", 0.0))
+        ees_terminal_soc_feasible = bool(final_info.get("ees_terminal_soc_feasible", True))
         final_gt_power = float(infos[-1].get("p_gt", 0.0)) if infos else 0.0
+        if not ees_terminal_soc_feasible:
+            print(
+                "WARNING: EES terminal SOC violation: "
+                f"case_index={case_idx}, final_ees_soc={final_ees_soc:.6f}, "
+                f"required={terminal_ees_required_soc:.6f}, "
+                f"shortage_kwh={terminal_ees_shortage_kwh:.6f}",
+                file=sys.stderr,
+            )
 
         summary_rows.append(
             {
@@ -750,6 +770,7 @@ def main() -> None:
                 "total_penalty_surplus_c": total_penalty_surplus_c,
                 "total_penalty_export_e": total_penalty_export_e,
                 "total_penalty_ev_export_guard": total_penalty_ev_export_guard,
+                "total_penalty_terminal_ees_soc": total_penalty_terminal_ees_soc,
                 "total_depart_energy_shortage_kwh": total_depart_energy_shortage_kwh,
                 "total_depart_shortage_soft_kwh": total_depart_shortage_soft_kwh,
                 "total_depart_shortage_mid_kwh": total_depart_shortage_mid_kwh,
@@ -776,6 +797,10 @@ def main() -> None:
                 "avg_p_ees_dis_kw": avg_p_ees_dis,
                 "ees_soc_episode_init": float(infos[0].get("ees_soc_episode_init", 0.0)) if infos else 0.0,
                 "final_ees_soc": final_ees_soc,
+                "ees_soc_init": ees_soc_init,
+                "terminal_ees_required_soc": terminal_ees_required_soc,
+                "terminal_ees_shortage_kwh": terminal_ees_shortage_kwh,
+                "ees_terminal_soc_feasible": ees_terminal_soc_feasible,
                 "final_gt_power": final_gt_power,
             }
         )
@@ -855,8 +880,10 @@ def main() -> None:
         grand_total_penalty_surplus_e = float(sum(item["total_penalty_surplus_e"] for item in summary_rows))
         grand_total_penalty_export_e = float(sum(item["total_penalty_export_e"] for item in summary_rows))
         grand_total_penalty_ev_export_guard = float(sum(item["total_penalty_ev_export_guard"] for item in summary_rows))
+        grand_total_penalty_terminal_ees_soc = float(sum(item["total_penalty_terminal_ees_soc"] for item in summary_rows))
         grand_total_penalty_surplus_h = float(sum(item["total_penalty_surplus_h"] for item in summary_rows))
         grand_total_penalty_surplus_c = float(sum(item["total_penalty_surplus_c"] for item in summary_rows))
+        grand_total_terminal_ees_shortage_kwh = float(sum(item["terminal_ees_shortage_kwh"] for item in summary_rows))
         grand_total_depart_risk_energy_kwh = float(sum(item["total_depart_risk_energy_kwh"] for item in summary_rows))
         grand_total_reward_storage_discharge_bonus = float(sum(item["total_reward_storage_discharge_bonus"] for item in summary_rows))
         grand_total_reward_storage_charge_bonus = float(sum(item["total_reward_storage_charge_bonus"] for item in summary_rows))
@@ -895,8 +922,10 @@ def main() -> None:
         print(f"Penalty surplus electricity: {grand_total_penalty_surplus_e:.4f}")
         print(f"Penalty export electricity: {grand_total_penalty_export_e:.4f}")
         print(f"Penalty EV export guard: {grand_total_penalty_ev_export_guard:.4f}")
+        print(f"Penalty EES terminal SOC: {grand_total_penalty_terminal_ees_soc:.4f}")
         print(f"Penalty surplus heat: {grand_total_penalty_surplus_h:.4f}")
         print(f"Penalty surplus cooling: {grand_total_penalty_surplus_c:.4f}")
+        print(f"EES terminal shortage (kWh): {grand_total_terminal_ees_shortage_kwh:.4f}")
         print(f"EV departure risk energy (kWh): {grand_total_depart_risk_energy_kwh:.4f}")
         print(f"Storage discharge reward bonus: {grand_total_reward_storage_discharge_bonus:.4f}")
         print(f"Storage charge reward bonus: {grand_total_reward_storage_charge_bonus:.4f}")

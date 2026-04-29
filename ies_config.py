@@ -101,6 +101,11 @@ class IESConfig:
     ees_self_discharge: float = 0.0
     ees_soc_min: float = 0.10
     ees_soc_max: float = 1.00
+    # Approximate daily cyclic SOC constraint for typical-day dispatch.
+    # It prevents the agent from draining initial EES energy after each daily reset
+    # and gaining an unfair cost advantage.
+    ees_terminal_soc_tolerance: float = 0.05
+    penalty_ees_terminal_soc: float = 5.0
     # EES 初始 SOC 固定为 0.80。
     ees_soc_init: float = 0.80
 

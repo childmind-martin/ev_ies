@@ -149,6 +149,9 @@ class ParkIESEnv(gym.Env):
         self.episode_penalty_depart_energy = 0.0
         self.episode_penalty_depart_risk = 0.0
         self.episode_penalty_ev_export_guard = 0.0
+        self.episode_terminal_ees_shortage_kwh = 0.0
+        self.episode_penalty_terminal_ees_soc = 0.0
+        self.episode_final_ees_soc = float(self.ees_soc)
         # 储能和 EV 引导奖励对应的行为统计量。
         self.episode_reward_storage_discharge = 0.0
         self.episode_reward_storage_charge = 0.0
@@ -230,6 +233,9 @@ class ParkIESEnv(gym.Env):
         self.episode_penalty_depart_energy = 0.0
         self.episode_penalty_depart_risk = 0.0
         self.episode_penalty_ev_export_guard = 0.0
+        self.episode_terminal_ees_shortage_kwh = 0.0
+        self.episode_penalty_terminal_ees_soc = 0.0
+        self.episode_final_ees_soc = float(self.ees_soc)
         self.episode_reward_storage_discharge = 0.0
         self.episode_reward_storage_charge = 0.0
         self.episode_reward_ev_target_timing = 0.0
@@ -358,6 +364,22 @@ class ParkIESEnv(gym.Env):
         )
         self.ees_soc = float(np.clip(self.ees_soc, self.cfg.ees_soc_min, self.cfg.ees_soc_max))
         self.ees_power = float(ees_dispatch["p_ees_dis"] - ees_dispatch["p_ees_ch"])
+        is_terminal_step = (self.t + 1 >= self.T)
+        terminal_ees_required_soc = max(
+            self.cfg.ees_soc_min,
+            self.ees_soc_episode_init - self.cfg.ees_terminal_soc_tolerance,
+        )
+        terminal_ees_shortage_kwh = 0.0
+        penalty_terminal_ees_soc = 0.0
+        if is_terminal_step:
+            terminal_ees_shortage_soc = max(
+                0.0,
+                terminal_ees_required_soc - float(self.ees_soc),
+            )
+            terminal_ees_shortage_kwh = terminal_ees_shortage_soc * self.cfg.ees_e_cap
+            penalty_terminal_ees_soc = (
+                terminal_ees_shortage_kwh * self.cfg.penalty_ees_terminal_soc
+            )
 
         active_ev_mask = np.asarray(ev_now["active_mask"], dtype=bool)
         ev_soc_delta = (
@@ -536,6 +558,7 @@ class ParkIESEnv(gym.Env):
             + penalty_ev_export_guard
             + penalty_surplus_h
             + penalty_surplus_c
+            + penalty_terminal_ees_soc
         )
 
         # guide_reward: cooperative storage guidance used to shape EV/EES timing behavior.
@@ -575,6 +598,9 @@ class ParkIESEnv(gym.Env):
         self.episode_penalty_depart_energy += float(penalty_depart_energy)
         self.episode_penalty_depart_risk += float(penalty_depart_risk)
         self.episode_penalty_ev_export_guard += float(penalty_ev_export_guard)
+        self.episode_terminal_ees_shortage_kwh += float(terminal_ees_shortage_kwh)
+        self.episode_penalty_terminal_ees_soc += float(penalty_terminal_ees_soc)
+        self.episode_final_ees_soc = float(self.ees_soc)
         self.episode_reward_storage_discharge += float(reward_storage_discharge_bonus)
         self.episode_reward_storage_charge += float(reward_storage_charge_bonus)
         self.episode_reward_ev_target_timing += float(reward_ev_target_timing_bonus)
@@ -661,6 +687,16 @@ class ParkIESEnv(gym.Env):
             "penalty_ev_export_guard": float(penalty_ev_export_guard),
             "penalty_surplus_h": float(penalty_surplus_h),
             "penalty_surplus_c": float(penalty_surplus_c),
+            "terminal_ees_required_soc": float(terminal_ees_required_soc),
+            "terminal_ees_shortage_kwh": float(terminal_ees_shortage_kwh),
+            "penalty_terminal_ees_soc": float(penalty_terminal_ees_soc),
+            "episode_terminal_ees_shortage_kwh": float(self.episode_terminal_ees_shortage_kwh),
+            "episode_penalty_terminal_ees_soc": float(self.episode_penalty_terminal_ees_soc),
+            "ees_soc_init": float(self.ees_soc_episode_init),
+            "final_ees_soc": float(self.ees_soc),
+            "ees_terminal_soc_feasible": bool(
+                float(self.ees_soc) + 1e-6 >= terminal_ees_required_soc
+            ),
             "storage_peak_shaved_kwh": float(storage_peak_shaved_kwh),
             "storage_charge_rewarded_kwh": float(storage_charge_rewarded_kwh),
             "ees_charge_rewarded_kwh": float(ees_charge_rewarded_kwh),
@@ -739,6 +775,9 @@ class ParkIESEnv(gym.Env):
                     "episode_penalty_depart_energy": float(self.episode_penalty_depart_energy),
                     "episode_penalty_depart_risk": float(self.episode_penalty_depart_risk),
                     "episode_penalty_ev_export_guard": float(self.episode_penalty_ev_export_guard),
+                    "episode_terminal_ees_shortage_kwh": float(self.episode_terminal_ees_shortage_kwh),
+                    "episode_penalty_terminal_ees_soc": float(self.episode_penalty_terminal_ees_soc),
+                    "episode_final_ees_soc": float(self.episode_final_ees_soc),
                     "episode_reward_storage_discharge": float(self.episode_reward_storage_discharge),
                     "episode_reward_storage_charge": float(self.episode_reward_storage_charge),
                     "episode_reward_ev_target_timing": float(self.episode_reward_ev_target_timing),
@@ -832,6 +871,16 @@ class ParkIESEnv(gym.Env):
 
         if not np.isfinite(self.cfg.ees_soc_init):
             raise ValueError(f"cfg.ees_soc_init must be finite, got {self.cfg.ees_soc_init}")
+        if not np.isfinite(self.cfg.ees_terminal_soc_tolerance) or self.cfg.ees_terminal_soc_tolerance < 0.0:
+            raise ValueError(
+                "cfg.ees_terminal_soc_tolerance must be finite and non-negative, "
+                f"got {self.cfg.ees_terminal_soc_tolerance}"
+            )
+        if not np.isfinite(self.cfg.penalty_ees_terminal_soc) or self.cfg.penalty_ees_terminal_soc < 0.0:
+            raise ValueError(
+                "cfg.penalty_ees_terminal_soc must be finite and non-negative, "
+                f"got {self.cfg.penalty_ees_terminal_soc}"
+            )
 
         if not (0.0 <= self.cfg.ees_soc_min < self.cfg.ees_soc_max <= 1.0):
             raise ValueError(
