@@ -52,6 +52,8 @@ SCALAR_TAGS = {
     "episode_penalty_depart_risk": ["custom/episode_penalty_depart_risk"],
     "episode_penalty_export_e": ["custom/episode_penalty_export_e"],
     "episode_penalty_ev_export_guard": ["custom/episode_penalty_ev_export_guard"],
+    "episode_terminal_ees_shortage_kwh": ["custom/episode_terminal_ees_shortage_kwh"],
+    "episode_penalty_terminal_ees_soc": ["custom/episode_penalty_terminal_ees_soc"],
     "episode_reward_storage_discharge": ["custom/episode_reward_storage_discharge"],
     "episode_reward_storage_charge": ["custom/episode_reward_storage_charge"],
     "episode_reward_ev_target_timing": ["custom/episode_reward_ev_target_timing"],
@@ -76,6 +78,8 @@ EPISODE_SUMMARY_KEYS = (
     "episode_penalty_depart_risk",
     "episode_penalty_export_e",
     "episode_penalty_ev_export_guard",
+    "episode_terminal_ees_shortage_kwh",
+    "episode_penalty_terminal_ees_soc",
     "episode_reward_storage_discharge",
     "episode_reward_storage_charge",
     "episode_reward_ev_target_timing",
@@ -95,6 +99,7 @@ PENALTY_PANEL_KEYS = [
     ("episode_penalty_depart_risk", "Departure risk", "#FF7F0E"),
     ("episode_penalty_export_e", "Export", "#8C564B"),
     ("episode_penalty_ev_export_guard", "EV export guard", "#E377C2"),
+    ("episode_penalty_terminal_ees_soc", "EES terminal SOC", "#9467BD"),
 ]
 
 EV_DIAGNOSTIC_KEYS = [

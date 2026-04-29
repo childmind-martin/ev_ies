@@ -38,6 +38,8 @@ AGG_METRICS = [
     "total_ev_flex_target_charge_kwh",
     "total_ev_buffer_charge_kwh",
     "final_ees_soc",
+    "terminal_ees_shortage_kwh",
+    "total_penalty_terminal_ees_soc",
 ]
 
 PLOT_METRICS = [
@@ -48,6 +50,14 @@ PLOT_METRICS = [
     "mean_total_grid_sell_kwh",
     "mean_total_depart_energy_shortage_kwh",
     "mean_total_storage_peak_shaved_kwh",
+    "mean_total_penalty_terminal_ees_soc",
+]
+
+EES_TERMINAL_CRITICAL_COLUMNS = [
+    "final_ees_soc",
+    "terminal_ees_shortage_kwh",
+    "total_penalty_terminal_ees_soc",
+    "ees_terminal_soc_feasible",
 ]
 
 REQUIRED_COLUMNS = [
@@ -83,6 +93,24 @@ def numeric(df: pd.DataFrame, column: str) -> pd.Series:
     return pd.to_numeric(df[column], errors="coerce").fillna(0.0)
 
 
+def numeric_nan(df: pd.DataFrame, column: str) -> pd.Series:
+    if column not in df.columns:
+        return pd.Series(np.full(len(df), np.nan, dtype=np.float64), index=df.index)
+    return pd.to_numeric(df[column], errors="coerce")
+
+
+def bool_flags(df: pd.DataFrame, column: str) -> pd.Series:
+    if column not in df.columns:
+        return pd.Series([pd.NA] * len(df), index=df.index, dtype="boolean")
+    values = df[column]
+    text_values = values.astype(str).str.strip().str.lower()
+    numeric_values = pd.to_numeric(values, errors="coerce")
+    result = pd.Series([pd.NA] * len(df), index=df.index, dtype="boolean")
+    result[text_values.isin({"true", "t", "yes", "y"}) | (numeric_values == 1)] = True
+    result[text_values.isin({"false", "f", "no", "n"}) | (numeric_values == 0)] = False
+    return result
+
+
 def load_summary(path: Path, method: str) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"{method} summary not found: {path}")
@@ -97,9 +125,19 @@ def load_summary(path: Path, method: str) -> pd.DataFrame:
     df["total_cost_plus_penalty"] = (
         numeric(df, "total_system_cost") + numeric(df, "total_penalties")
     )
+    missing_ees = [column for column in EES_TERMINAL_CRITICAL_COLUMNS if column not in df.columns]
+    if missing_ees:
+        print(
+            "WARNING: "
+            f"{method} daily_summary.csv: EES terminal SOC columns are missing; "
+            "the comparison report is incomplete for SCI reporting. "
+            f"Missing columns: {missing_ees}"
+        )
+        for column in missing_ees:
+            df[column] = np.nan
     for column in AGG_METRICS:
         if column not in df.columns:
-            df[column] = 0.0
+            df[column] = np.nan if column in EES_TERMINAL_CRITICAL_COLUMNS else 0.0
     return df
 
 
@@ -109,9 +147,22 @@ def aggregate_method(df: pd.DataFrame, method: str) -> dict[str, float | int | s
         "n_days": int(len(df)),
     }
     for metric in AGG_METRICS:
-        values = numeric(df, metric)
-        row[f"mean_{metric}"] = float(values.mean()) if len(values) else float("nan")
-        row[f"sum_{metric}"] = float(values.sum()) if len(values) else float("nan")
+        values = (
+            numeric_nan(df, metric)
+            if metric in {"final_ees_soc", "terminal_ees_shortage_kwh", "total_penalty_terminal_ees_soc"}
+            else numeric(df, metric)
+        )
+        clean = values.dropna()
+        row[f"mean_{metric}"] = float(clean.mean()) if len(clean) else float("nan")
+        row[f"sum_{metric}"] = float(clean.sum()) if len(clean) else float("nan")
+    feasible = bool_flags(df, "ees_terminal_soc_feasible")
+    if len(feasible) and bool(feasible.notna().all()):
+        feasible_days = int(feasible.fillna(False).sum())
+        row["terminal_ees_feasible_days"] = feasible_days
+        row["terminal_ees_feasible_ratio"] = float(feasible_days / len(df)) if len(df) else float("nan")
+    else:
+        row["terminal_ees_feasible_days"] = float("nan")
+        row["terminal_ees_feasible_ratio"] = float("nan")
     return row
 
 
@@ -166,6 +217,12 @@ def write_report(
         "mean_total_unmet_c",
         "mean_total_storage_peak_shaved_kwh",
         "mean_final_ees_soc",
+        "mean_terminal_ees_shortage_kwh",
+        "sum_terminal_ees_shortage_kwh",
+        "mean_total_penalty_terminal_ees_soc",
+        "sum_total_penalty_terminal_ees_soc",
+        "terminal_ees_feasible_days",
+        "terminal_ees_feasible_ratio",
     ]
     existing_display_cols = [col for col in display_cols if col in method_summary.columns]
     if not method_summary.empty:

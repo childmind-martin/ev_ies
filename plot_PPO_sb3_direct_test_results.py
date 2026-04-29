@@ -71,7 +71,10 @@ PENALTY_COMPONENT_SPECS = [
     ("total_penalty_surplus_c", "Cooling surplus", "#59A14F"),
     ("total_penalty_export_e", "Grid export", "#4E79A7"),
     ("total_penalty_ev_export_guard", "EV export guard", "#76B7B2"),
+    ("total_penalty_terminal_ees_soc", "EES terminal SOC penalty", "#9467BD"),
 ]
+
+ALWAYS_SHOW_COMPONENT_COLUMNS = {"total_penalty_terminal_ees_soc"}
 
 
 def configure_matplotlib() -> None:
@@ -164,7 +167,7 @@ def get_existing_component_specs(
     for col, label, color in specs:
         if col not in df.columns:
             continue
-        if float(df[col].abs().sum()) <= min_total:
+        if float(df[col].abs().sum()) <= min_total and col not in ALWAYS_SHOW_COMPONENT_COLUMNS:
             continue
         existing.append((col, label, color))
     return existing
@@ -452,6 +455,62 @@ def format_metric(value: object, digits: int = 2) -> str:
     return str(value)
 
 
+def format_bool_metric(value: object) -> str:
+    try:
+        if pd.isna(value):
+            return "-"
+    except Exception:
+        pass
+    text = str(value).strip().lower()
+    if text in {"true", "1", "1.0", "yes", "y"}:
+        return "True"
+    if text in {"false", "0", "0.0", "no", "n"}:
+        return "False"
+    return str(value)
+
+
+def terminal_ees_stats(test_df: pd.DataFrame) -> dict[str, float | int]:
+    final_soc = (
+        pd.to_numeric(test_df["final_ees_soc"], errors="coerce")
+        if "final_ees_soc" in test_df.columns
+        else pd.Series(np.nan, index=test_df.index)
+    )
+    shortage = (
+        pd.to_numeric(test_df["terminal_ees_shortage_kwh"], errors="coerce")
+        if "terminal_ees_shortage_kwh" in test_df.columns
+        else pd.Series(0.0, index=test_df.index)
+    ).fillna(0.0)
+    penalty = (
+        pd.to_numeric(test_df["total_penalty_terminal_ees_soc"], errors="coerce")
+        if "total_penalty_terminal_ees_soc" in test_df.columns
+        else pd.Series(0.0, index=test_df.index)
+    ).fillna(0.0)
+    if "ees_terminal_soc_feasible" in test_df.columns:
+        feasible_text = test_df["ees_terminal_soc_feasible"].astype(str).str.strip().str.lower()
+        feasible_num = pd.to_numeric(test_df["ees_terminal_soc_feasible"], errors="coerce")
+        infeasible = feasible_text.isin({"false", "f", "no", "n"}) | (feasible_num == 0)
+    else:
+        infeasible = pd.Series(False, index=test_df.index)
+    violation = infeasible | (shortage > 1e-6)
+    return {
+        "n_terminal_ees_violation_days": int(violation.sum()),
+        "min_final_ees_soc": float(final_soc.min()) if final_soc.notna().any() else float("nan"),
+        "sum_terminal_ees_shortage_kwh": float(shortage.sum()),
+        "sum_penalty_terminal_ees_soc": float(penalty.sum()),
+    }
+
+
+def terminal_ees_stats_text(test_df: pd.DataFrame) -> str:
+    stats = terminal_ees_stats(test_df)
+    return (
+        "EES terminal SOC\n"
+        f"violations: {stats['n_terminal_ees_violation_days']}\n"
+        f"min final SOC: {stats['min_final_ees_soc']:.4f}\n"
+        f"shortage: {stats['sum_terminal_ees_shortage_kwh']:.2f} kWh\n"
+        f"penalty: {stats['sum_penalty_terminal_ees_soc']:.2f}"
+    )
+
+
 def summary_text_box(summary_row: pd.Series | None) -> str:
     if summary_row is None:
         return "No daily summary row found."
@@ -461,7 +520,11 @@ def summary_text_box(summary_row: pd.Series | None) -> str:
         f"Guide reward: {format_metric(summary_row.get('total_guide_reward'))}",
         f"Grid buy (kWh): {format_metric(summary_row.get('total_grid_buy_kwh'))}",
         f"Grid sell (kWh): {format_metric(summary_row.get('total_grid_sell_kwh'))}",
-        f"Final EES SOC: {format_metric(summary_row.get('final_ees_soc'), 3)}",
+        f"Final EES SOC: {format_metric(summary_row.get('final_ees_soc'), 4)}",
+        f"Required EES SOC: {format_metric(summary_row.get('terminal_ees_required_soc'), 4)}",
+        f"EES terminal shortage: {format_metric(summary_row.get('terminal_ees_shortage_kwh'), 2)} kWh",
+        f"EES terminal penalty: {format_metric(summary_row.get('total_penalty_terminal_ees_soc'), 2)}",
+        f"EES terminal feasible: {format_bool_metric(summary_row.get('ees_terminal_soc_feasible'))}",
     ]
     return "\n".join(lines)
 
@@ -863,7 +926,11 @@ def build_metric_cards(summary_row: pd.Series | None) -> str:
         ("Guide reward", format_metric(summary_row.get("total_guide_reward"))),
         ("Grid buy (kWh)", format_metric(summary_row.get("total_grid_buy_kwh"))),
         ("Grid sell (kWh)", format_metric(summary_row.get("total_grid_sell_kwh"))),
-        ("Final EES SOC", format_metric(summary_row.get("final_ees_soc"), 3)),
+        ("Final EES SOC", format_metric(summary_row.get("final_ees_soc"), 4)),
+        ("Required EES SOC", format_metric(summary_row.get("terminal_ees_required_soc"), 4)),
+        ("EES terminal shortage (kWh)", format_metric(summary_row.get("terminal_ees_shortage_kwh"), 2)),
+        ("EES terminal penalty", format_metric(summary_row.get("total_penalty_terminal_ees_soc"), 2)),
+        ("EES terminal feasible", format_bool_metric(summary_row.get("ees_terminal_soc_feasible"))),
     ]
     parts: list[str] = []
     for label, value in items:
@@ -1169,6 +1236,14 @@ def plot_daily_cost_penalty_anomalies(
 ) -> None:
     test_df = filter_test_rows(summary_df).sort_values("case_index").reset_index(drop=True)
     case_indices = test_df["case_index"].to_numpy(dtype=float)
+    terminal_stats = terminal_ees_stats(test_df)
+    print(
+        "EES terminal SOC anomaly check: "
+        f"n_terminal_ees_violation_days={terminal_stats['n_terminal_ees_violation_days']}, "
+        f"min_final_ees_soc={terminal_stats['min_final_ees_soc']:.6f}, "
+        f"sum_terminal_ees_shortage_kwh={terminal_stats['sum_terminal_ees_shortage_kwh']:.6f}, "
+        f"sum_penalty_terminal_ees_soc={terminal_stats['sum_penalty_terminal_ees_soc']:.6f}"
+    )
     fig, axes = plt.subplots(2, 1, figsize=(15.5, 10.0), sharex=True)
 
     configs = [
@@ -1212,6 +1287,16 @@ def plot_daily_cost_penalty_anomalies(
 
     axes[1].set_xlabel("测试 case_index")
     fig.suptitle("PPO 测试日异常总览", fontsize=16)
+    axes[1].text(
+        0.99,
+        0.96,
+        terminal_ees_stats_text(test_df),
+        transform=axes[1].transAxes,
+        ha="right",
+        va="top",
+        fontsize=9.5,
+        bbox={"boxstyle": "round,pad=0.30", "facecolor": "#FFF8E8", "edgecolor": "#D8C690"},
+    )
     fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.97])
     fig.savefig(output_dir / "test_daily_cost_penalty_anomalies.png", dpi=PNG_DPI, bbox_inches="tight")
     plt.close(fig)

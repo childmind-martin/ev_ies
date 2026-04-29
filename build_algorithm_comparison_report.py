@@ -74,7 +74,20 @@ PENALTY_COLUMNS = [
     "total_penalty_terminal_ees_soc",
 ]
 
+PENALTY_LABELS = {
+    "total_penalty_terminal_ees_soc": "EES terminal SOC penalty",
+}
+
 EES_TERMINAL_DAILY_COLUMNS = [
+    "final_ees_soc",
+    "ees_soc_init",
+    "terminal_ees_required_soc",
+    "terminal_ees_shortage_kwh",
+    "total_penalty_terminal_ees_soc",
+    "ees_terminal_soc_feasible",
+]
+
+EES_TERMINAL_CRITICAL_COLUMNS = [
     "final_ees_soc",
     "terminal_ees_shortage_kwh",
     "total_penalty_terminal_ees_soc",
@@ -226,6 +239,27 @@ def numeric(df: pd.DataFrame, column: str) -> pd.Series:
     return pd.to_numeric(df[column], errors="coerce").fillna(0.0)
 
 
+def numeric_nan(df: pd.DataFrame, column: str) -> pd.Series:
+    if column not in df.columns:
+        return pd.Series(np.full(len(df), np.nan, dtype=np.float64), index=df.index)
+    return pd.to_numeric(df[column], errors="coerce")
+
+
+def finite_mean(series: pd.Series) -> float:
+    clean = pd.to_numeric(series, errors="coerce").dropna()
+    return float(clean.mean()) if len(clean) else np.nan
+
+
+def finite_min(series: pd.Series) -> float:
+    clean = pd.to_numeric(series, errors="coerce").dropna()
+    return float(clean.min()) if len(clean) else np.nan
+
+
+def finite_sum(series: pd.Series) -> float:
+    clean = pd.to_numeric(series, errors="coerce").dropna()
+    return float(clean.sum()) if len(clean) else np.nan
+
+
 def boolean_flag(df: pd.DataFrame, column: str) -> pd.Series:
     if column not in df.columns:
         return pd.Series(np.zeros(len(df), dtype=bool), index=df.index)
@@ -233,6 +267,20 @@ def boolean_flag(df: pd.DataFrame, column: str) -> pd.Series:
     numeric_values = pd.to_numeric(values, errors="coerce")
     text_values = values.astype(str).str.strip().str.lower()
     return text_values.isin({"true", "t", "yes", "y"}) | (numeric_values.fillna(0.0) > 0.5)
+
+
+def boolean_flag_nan(df: pd.DataFrame, column: str) -> pd.Series:
+    if column not in df.columns:
+        return pd.Series([pd.NA] * len(df), index=df.index, dtype="boolean")
+    values = df[column]
+    text_values = values.astype(str).str.strip().str.lower()
+    numeric_values = pd.to_numeric(values, errors="coerce")
+    result = pd.Series([pd.NA] * len(df), index=df.index, dtype="boolean")
+    true_mask = text_values.isin({"true", "t", "yes", "y"}) | (numeric_values == 1)
+    false_mask = text_values.isin({"false", "f", "no", "n"}) | (numeric_values == 0)
+    result[true_mask] = True
+    result[false_mask] = False
+    return result
 
 
 def ensure_columns(
@@ -248,6 +296,31 @@ def ensure_columns(
         if column not in df.columns:
             warning_log.warn(f"{method} {source_name} missing column {column}; filled with 0.")
             df[column] = 0.0
+    return df
+
+
+def ensure_ees_terminal_columns(
+    df: pd.DataFrame,
+    *,
+    method: str,
+    source_name: str,
+    warning_log: WarningLog,
+) -> pd.DataFrame:
+    df = df.copy()
+    missing = [column for column in EES_TERMINAL_DAILY_COLUMNS if column not in df.columns]
+    critical_missing = [column for column in EES_TERMINAL_CRITICAL_COLUMNS if column not in df.columns]
+    if critical_missing:
+        warning_log.warn(
+            f"{method} {source_name}: EES terminal SOC columns are missing; "
+            "the comparison report is incomplete for SCI reporting. "
+            f"Missing columns: {critical_missing}"
+        )
+    elif missing:
+        warning_log.warn(
+            f"{method} {source_name} missing optional EES terminal SOC columns: {missing}."
+        )
+    for column in missing:
+        df[column] = np.nan
     return df
 
 
@@ -271,9 +344,14 @@ def load_method_data(config: MethodConfig, warning_log: WarningLog) -> dict[str,
             "total_system_cost",
             "total_penalties",
             *ECONOMIC_COST_COLUMNS,
-            *PENALTY_COLUMNS,
-            *EES_TERMINAL_DAILY_COLUMNS,
+            *[column for column in PENALTY_COLUMNS if column != "total_penalty_terminal_ees_soc"],
         ],
+        method=config.method,
+        source_name="daily_summary.csv",
+        warning_log=warning_log,
+    )
+    daily_df = ensure_ees_terminal_columns(
+        daily_df,
         method=config.method,
         source_name="daily_summary.csv",
         warning_log=warning_log,
@@ -359,7 +437,12 @@ def build_penalty_breakdown(method_data: list[dict[str, Any]]) -> pd.DataFrame:
             "mean_total_penalties": float(numeric(df, "total_penalties").mean()) if len(df) else np.nan,
         }
         for column in PENALTY_COLUMNS:
-            row[f"mean_{column}"] = float(numeric(df, column).mean()) if len(df) else np.nan
+            values = (
+                numeric_nan(df, column)
+                if column == "total_penalty_terminal_ees_soc"
+                else numeric(df, column)
+            )
+            row[f"mean_{column}"] = finite_mean(values) if len(df) else np.nan
         rows.append(row)
     if not rows:
         return pd.DataFrame(columns=PENALTY_OUTPUT_COLUMNS)
@@ -377,8 +460,15 @@ def build_performance_summary(method_data: list[dict[str, Any]]) -> pd.DataFrame
 
         n_days = int(runtime.get("n_days", len(df)))
         n_steps = int(runtime.get("n_steps", len(timeseries_df)))
-        feasible_flags = boolean_flag(df, "ees_terminal_soc_feasible")
-        feasible_days = int(feasible_flags.sum()) if len(df) else 0
+        final_ees_soc = numeric_nan(df, "final_ees_soc")
+        terminal_shortage = numeric_nan(df, "terminal_ees_shortage_kwh")
+        terminal_penalty = numeric_nan(df, "total_penalty_terminal_ees_soc")
+        feasible_flags = boolean_flag_nan(df, "ees_terminal_soc_feasible")
+        feasible_days = (
+            int(feasible_flags.fillna(False).sum())
+            if len(df) and bool(feasible_flags.notna().all())
+            else np.nan
+        )
         rows.append(
             {
                 "method": config.method,
@@ -392,13 +482,15 @@ def build_performance_summary(method_data: list[dict[str, Any]]) -> pd.DataFrame
                 "test_duration_seconds": runtime.get("test_duration_seconds", np.nan),
                 "time_per_day_seconds": runtime.get("time_per_day_seconds", np.nan),
                 "time_per_step_seconds": runtime.get("time_per_step_seconds", np.nan),
-                "mean_final_ees_soc": float(numeric(df, "final_ees_soc").mean()) if len(df) else np.nan,
-                "min_final_ees_soc": float(numeric(df, "final_ees_soc").min()) if len(df) else np.nan,
+                "mean_final_ees_soc": finite_mean(final_ees_soc) if len(df) else np.nan,
+                "min_final_ees_soc": finite_min(final_ees_soc) if len(df) else np.nan,
                 "terminal_ees_feasible_days": feasible_days,
-                "terminal_ees_feasible_ratio": float(feasible_days / len(df)) if len(df) else np.nan,
-                "sum_terminal_ees_shortage_kwh": float(numeric(df, "terminal_ees_shortage_kwh").sum()),
-                "mean_terminal_ees_shortage_kwh": float(numeric(df, "terminal_ees_shortage_kwh").mean()) if len(df) else np.nan,
-                "sum_penalty_terminal_ees_soc": float(numeric(df, "total_penalty_terminal_ees_soc").sum()),
+                "terminal_ees_feasible_ratio": float(feasible_days / len(df))
+                if len(df) and np.isfinite(feasible_days)
+                else np.nan,
+                "sum_terminal_ees_shortage_kwh": finite_sum(terminal_shortage),
+                "mean_terminal_ees_shortage_kwh": finite_mean(terminal_shortage) if len(df) else np.nan,
+                "sum_penalty_terminal_ees_soc": finite_sum(terminal_penalty),
             }
         )
     if not rows:
@@ -558,7 +650,8 @@ def plot_penalty_breakdown(penalty_df: pd.DataFrame, path: Path, *, log_scale: b
     for idx, column in enumerate(PENALTY_COLUMNS):
         mean_col = f"mean_{column}"
         values = pd.to_numeric(penalty_df[mean_col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
-        ax.bar(x, values, bottom=bottom, label=column.replace("total_penalty_", ""), color=colors[idx % len(colors)])
+        label = PENALTY_LABELS.get(column, column.replace("total_penalty_", ""))
+        ax.bar(x, values, bottom=bottom, label=label, color=colors[idx % len(colors)])
         bottom += values
     if log_scale:
         ax.set_yscale("symlog", linthresh=1.0)

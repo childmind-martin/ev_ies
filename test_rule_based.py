@@ -281,6 +281,30 @@ def build_daily_summary_row(
     dt: float,
 ) -> dict[str, Any]:
     final_info = infos[-1] if infos else {}
+    missing_terminal_info = [
+        key
+        for key in (
+            "final_ees_soc",
+            "ees_soc_init",
+            "terminal_ees_required_soc",
+            "episode_terminal_ees_shortage_kwh",
+            "episode_penalty_terminal_ees_soc",
+            "ees_terminal_soc_feasible",
+        )
+        if key not in final_info
+    ]
+    if missing_terminal_info:
+        print(
+            "WARNING: EES terminal SOC info missing: "
+            f"case_index={case_idx}, missing={missing_terminal_info}; fallback values used.",
+            file=sys.stderr,
+        )
+    final_ees_soc = float(final_info.get("final_ees_soc", final_info.get("ees_soc", 0.0)))
+    ees_soc_init = float(final_info.get("ees_soc_init", final_info.get("ees_soc_episode_init", 0.0)))
+    terminal_ees_required_soc = float(final_info.get("terminal_ees_required_soc", 0.0))
+    terminal_ees_shortage_kwh = float(final_info.get("episode_terminal_ees_shortage_kwh", 0.0))
+    total_penalty_terminal_ees_soc = float(final_info.get("episode_penalty_terminal_ees_soc", 0.0))
+    ees_terminal_soc_feasible = bool(final_info.get("ees_terminal_soc_feasible", True))
     row = {
         "case_index": int(case_idx),
         "month": case.month,
@@ -316,6 +340,7 @@ def build_daily_summary_row(
         "total_penalty_surplus_c": sum_info(infos, "penalty_surplus_c"),
         "total_penalty_export_e": sum_info(infos, "penalty_export_e"),
         "total_penalty_ev_export_guard": sum_info(infos, "penalty_ev_export_guard"),
+        "total_penalty_terminal_ees_soc": total_penalty_terminal_ees_soc,
         "total_depart_energy_shortage_kwh": sum_info(infos, "depart_energy_shortage_kwh"),
         "total_depart_shortage_soft_kwh": sum_info(infos, "depart_shortage_soft_kwh"),
         "total_depart_shortage_mid_kwh": sum_info(infos, "depart_shortage_mid_kwh"),
@@ -355,7 +380,11 @@ def build_daily_summary_row(
         "ees_soc_episode_init": float(
             infos[0].get("ees_soc_episode_init", 0.0) if infos else 0.0
         ),
-        "final_ees_soc": float(final_info.get("ees_soc", 0.0)),
+        "final_ees_soc": final_ees_soc,
+        "ees_soc_init": ees_soc_init,
+        "terminal_ees_required_soc": terminal_ees_required_soc,
+        "terminal_ees_shortage_kwh": terminal_ees_shortage_kwh,
+        "ees_terminal_soc_feasible": ees_terminal_soc_feasible,
         "final_gt_power": float(final_info.get("p_gt", 0.0)),
     }
     return {column: row.get(column, 0.0) for column in DAILY_SUMMARY_COLUMNS}
@@ -411,6 +440,7 @@ def build_config_row(
         "ees_soc_init": cfg_values["ees_soc_init"],
         "ees_soc_min": cfg_values["ees_soc_min"],
         "ees_soc_max": cfg_values["ees_soc_max"],
+        "ees_terminal_soc_tolerance": cfg_values["ees_terminal_soc_tolerance"],
         "penalty_unserved_e": cfg_values["penalty_unserved_e"],
         "penalty_unserved_h": cfg_values["penalty_unserved_h"],
         "penalty_unserved_c": cfg_values["penalty_unserved_c"],
@@ -423,6 +453,7 @@ def build_config_row(
         "penalty_surplus_c": cfg_values["penalty_surplus_c"],
         "penalty_export_e": cfg_values["penalty_export_e"],
         "penalty_ev_export_guard": cfg_values["penalty_ev_export_guard"],
+        "penalty_ees_terminal_soc": cfg_values["penalty_ees_terminal_soc"],
         "ev_discharge_price_threshold": cfg_values["ev_discharge_price_threshold"],
         "ev_charge_price_threshold": cfg_values["ev_charge_price_threshold"],
         "ev_peak_export_tolerance_kw": cfg_values["ev_peak_export_tolerance_kw"],
