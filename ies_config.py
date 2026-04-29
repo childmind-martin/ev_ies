@@ -105,7 +105,7 @@ class IESConfig:
     # It prevents the agent from draining initial EES energy after each daily reset
     # and gaining an unfair cost advantage.
     ees_terminal_soc_tolerance: float = 0.05
-    penalty_ees_terminal_soc: float = 5.0
+    penalty_ees_terminal_soc: float = 8.0
     # EES 初始 SOC 固定为 0.80。
     ees_soc_init: float = 0.80
 

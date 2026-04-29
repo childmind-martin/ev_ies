@@ -263,6 +263,24 @@ def build_daily_summary(case_idx: int, case: Any, infos: list[dict[str, Any]], t
     total_gt_export_clip_steps = int(sum(1 for item in infos if float(item.get("p_gt_export_clip", 0.0)) > ALERT_TOL))
     total_gt_safe_infeasible_steps = int(sum(1 for item in infos if not bool(item.get("gt_safe_feasible", True))))
     final_info = infos[-1] if infos else {}
+    missing_terminal_info = [
+        key
+        for key in (
+            "final_ees_soc",
+            "ees_soc_init",
+            "terminal_ees_required_soc",
+            "episode_terminal_ees_shortage_kwh",
+            "episode_penalty_terminal_ees_soc",
+            "ees_terminal_soc_feasible",
+        )
+        if key not in final_info
+    ]
+    if missing_terminal_info:
+        print(
+            "WARNING: EES terminal SOC info missing: "
+            f"case_index={case_idx}, missing={missing_terminal_info}; fallback values used.",
+            file=sys.stderr,
+        )
     final_ees_soc = float(final_info.get("final_ees_soc", final_info.get("ees_soc", 0.0)))
     ees_soc_init = float(final_info.get("ees_soc_init", final_info.get("ees_soc_episode_init", 0.0)))
     terminal_ees_required_soc = float(final_info.get("terminal_ees_required_soc", 0.0))

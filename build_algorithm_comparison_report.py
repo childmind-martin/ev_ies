@@ -71,6 +71,14 @@ PENALTY_COLUMNS = [
     "total_penalty_surplus_c",
     "total_penalty_export_e",
     "total_penalty_ev_export_guard",
+    "total_penalty_terminal_ees_soc",
+]
+
+EES_TERMINAL_DAILY_COLUMNS = [
+    "final_ees_soc",
+    "terminal_ees_shortage_kwh",
+    "total_penalty_terminal_ees_soc",
+    "ees_terminal_soc_feasible",
 ]
 
 ECONOMIC_OUTPUT_COLUMNS = [
@@ -109,6 +117,13 @@ PERFORMANCE_OUTPUT_COLUMNS = [
     "test_duration_seconds",
     "time_per_day_seconds",
     "time_per_step_seconds",
+    "mean_final_ees_soc",
+    "min_final_ees_soc",
+    "terminal_ees_feasible_days",
+    "terminal_ees_feasible_ratio",
+    "sum_terminal_ees_shortage_kwh",
+    "mean_terminal_ees_shortage_kwh",
+    "sum_penalty_terminal_ees_soc",
 ]
 
 VALIDATION_REWARD_OUTPUT_COLUMNS = [
@@ -211,6 +226,15 @@ def numeric(df: pd.DataFrame, column: str) -> pd.Series:
     return pd.to_numeric(df[column], errors="coerce").fillna(0.0)
 
 
+def boolean_flag(df: pd.DataFrame, column: str) -> pd.Series:
+    if column not in df.columns:
+        return pd.Series(np.zeros(len(df), dtype=bool), index=df.index)
+    values = df[column]
+    numeric_values = pd.to_numeric(values, errors="coerce")
+    text_values = values.astype(str).str.strip().str.lower()
+    return text_values.isin({"true", "t", "yes", "y"}) | (numeric_values.fillna(0.0) > 0.5)
+
+
 def ensure_columns(
     df: pd.DataFrame,
     columns: list[str],
@@ -243,7 +267,13 @@ def load_method_data(config: MethodConfig, warning_log: WarningLog) -> dict[str,
     daily_df = pd.read_csv(daily_path)
     daily_df = ensure_columns(
         daily_df,
-        ["total_system_cost", "total_penalties", *ECONOMIC_COST_COLUMNS, *PENALTY_COLUMNS],
+        [
+            "total_system_cost",
+            "total_penalties",
+            *ECONOMIC_COST_COLUMNS,
+            *PENALTY_COLUMNS,
+            *EES_TERMINAL_DAILY_COLUMNS,
+        ],
         method=config.method,
         source_name="daily_summary.csv",
         warning_log=warning_log,
@@ -347,6 +377,8 @@ def build_performance_summary(method_data: list[dict[str, Any]]) -> pd.DataFrame
 
         n_days = int(runtime.get("n_days", len(df)))
         n_steps = int(runtime.get("n_steps", len(timeseries_df)))
+        feasible_flags = boolean_flag(df, "ees_terminal_soc_feasible")
+        feasible_days = int(feasible_flags.sum()) if len(df) else 0
         rows.append(
             {
                 "method": config.method,
@@ -360,6 +392,13 @@ def build_performance_summary(method_data: list[dict[str, Any]]) -> pd.DataFrame
                 "test_duration_seconds": runtime.get("test_duration_seconds", np.nan),
                 "time_per_day_seconds": runtime.get("time_per_day_seconds", np.nan),
                 "time_per_step_seconds": runtime.get("time_per_step_seconds", np.nan),
+                "mean_final_ees_soc": float(numeric(df, "final_ees_soc").mean()) if len(df) else np.nan,
+                "min_final_ees_soc": float(numeric(df, "final_ees_soc").min()) if len(df) else np.nan,
+                "terminal_ees_feasible_days": feasible_days,
+                "terminal_ees_feasible_ratio": float(feasible_days / len(df)) if len(df) else np.nan,
+                "sum_terminal_ees_shortage_kwh": float(numeric(df, "terminal_ees_shortage_kwh").sum()),
+                "mean_terminal_ees_shortage_kwh": float(numeric(df, "terminal_ees_shortage_kwh").mean()) if len(df) else np.nan,
+                "sum_penalty_terminal_ees_soc": float(numeric(df, "total_penalty_terminal_ees_soc").sum()),
             }
         )
     if not rows:
