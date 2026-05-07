@@ -58,6 +58,17 @@ COMPARISON_COLUMNS = (
     "mean_total_ev_flex_target_charge_kwh",
     "mean_total_ev_buffer_charge_kwh",
     "mean_final_ees_soc",
+    "terminal_ees_feasible_days",
+    "terminal_ees_feasible_ratio",
+    "min_final_ees_soc",
+    "sum_terminal_ees_shortage_kwh",
+    "sum_penalty_terminal_ees_soc",
+    "total_depart_energy_shortage_kwh",
+    "total_unmet_e",
+    "total_unmet_h",
+    "total_unmet_c",
+    "total_grid_sell_kwh",
+    "total_penalty_ev_export_guard",
 )
 
 
@@ -208,32 +219,163 @@ def rule_based_action(inner_env, ev_mode: str = "v2g") -> np.ndarray:
 
     cfg = inner_env.cfg
     t = int(inner_env.t)
-    t_idx = min(max(t, 0), int(inner_env.T) - 1)
+    T = int(inner_env.T)
+    t_idx = min(max(t, 0), T - 1)
 
     try:
-        price = float(inner_env._get_exogenous(t_idx)["grid_buy_price"])
+        exogenous = inner_env._get_exogenous(t_idx)
     except Exception:
-        price = float(np.asarray(cfg.grid_buy_price_24, dtype=np.float32)[t_idx % 24])
+        exogenous = {
+            "elec_load": 0.0,
+            "heat_load": 0.0,
+            "pv": 0.0,
+            "wt": 0.0,
+            "grid_buy_price": float(
+                np.asarray(cfg.grid_buy_price_24, dtype=np.float32)[t_idx % 24]
+            ),
+        }
 
+    price = float(exogenous["grid_buy_price"])
+    elec_load = float(exogenous.get("elec_load", 0.0))
+    heat_load = float(exogenous.get("heat_load", 0.0))
+    pv = float(exogenous.get("pv", 0.0))
+    wt = float(exogenous.get("wt", 0.0))
+    net_electric_pressure = elec_load - pv - wt
     ees_soc = float(inner_env.ees_soc)
+
+    required_soc = max(
+        float(cfg.ees_soc_min),
+        float(inner_env.ees_soc_episode_init) - float(cfg.ees_terminal_soc_tolerance),
+    )
+    remaining_after_this = max(0, T - t - 1)
+    max_recoverable_soc_after = (
+        remaining_after_this
+        * float(cfg.ees_p_max)
+        * float(cfg.ees_eta_ch)
+        * float(cfg.dt)
+        / max(float(cfg.ees_e_cap), 1e-6)
+    )
+    dynamic_min_soc = max(
+        float(cfg.ees_soc_min),
+        required_soc - max_recoverable_soc_after,
+    )
+
+    try:
+        ev_now = inner_env._compute_ev_boundaries(t_idx, inner_env.ev_soc)
+    except Exception:
+        ev_now = {}
+
+    ev_departure_risk = False
+    target_charge_boundary_kw = float(ev_now.get("p_flex_target_ch", 0.0) or 0.0)
+    discharge_boundary_kw = float(ev_now.get("p_flex_dis", 0.0) or 0.0)
+    rigid_charge_boundary_kw = float(ev_now.get("p_rigid", 0.0) or 0.0)
+    max_ev_charge_kw = 1.0
+
+    try:
+        ev_data = inner_env.ev
+        ev_soc = np.asarray(inner_env.ev_soc, dtype=np.float32)
+        arr = np.asarray(ev_data["arr_step"], dtype=np.int32)
+        dep = np.asarray(ev_data["dep_step"], dtype=np.int32)
+        target_soc = np.asarray(ev_data["target_soc"], dtype=np.float32)
+        cap_kwh = np.asarray(ev_data["cap_kwh"], dtype=np.float32)
+        p_ch_max = np.asarray(ev_data["p_ch_max_kw"], dtype=np.float32)
+        max_ev_charge_kw = max(float(np.sum(p_ch_max, dtype=np.float64)), 1.0)
+        active = (arr <= t_idx) & (t_idx < dep)
+        target_gap_kwh = np.maximum(target_soc - ev_soc, 0.0) * cap_kwh
+        time_to_depart_steps = dep - t_idx
+        soon_departure_risk = (
+            active
+            & (target_gap_kwh > 1e-6)
+            & (time_to_depart_steps <= 2)
+        )
+        laxity = np.asarray(
+            ev_now.get("laxity_target", np.full(ev_soc.shape, np.inf)),
+            dtype=np.float32,
+        )
+        low_laxity_risk = (
+            active
+            & (target_gap_kwh > 1e-6)
+            & (laxity <= 2.0 * float(cfg.dt) + 1e-6)
+        )
+        ev_departure_risk = bool(
+            rigid_charge_boundary_kw > 1e-6
+            or np.any(soon_departure_risk)
+            or np.any(low_laxity_risk)
+        )
+    except Exception:
+        ev_departure_risk = rigid_charge_boundary_kw > 1e-6
+
     a_ees = 0.0
     a_gt = 0.0
     a_ev_ch = 0.0
     a_ev_dis = 0.0
 
-    if price <= float(cfg.ev_charge_price_threshold):
-        a_ees = 1.0 if ees_soc < float(cfg.ees_reward_charge_soc_target) else 0.0
-        a_gt = -1.0
+    terminal_recovery_active = bool(
+        t >= T - 4 or ees_soc < dynamic_min_soc + 0.02
+    )
+    if terminal_recovery_active:
+        recovery_target_soc = min(float(cfg.ees_soc_max), required_soc + 1e-4)
+        shortage_kwh = max(0.0, recovery_target_soc - ees_soc) * float(cfg.ees_e_cap)
+        if shortage_kwh > 1e-9:
+            remaining_charge_steps = max(1, T - t)
+            needed_charge_kw = shortage_kwh / (
+                max(float(cfg.ees_eta_ch) * float(cfg.dt) * remaining_charge_steps, 1e-6)
+            )
+            a_ees = min(1.0, needed_charge_kw / max(float(cfg.ees_p_max), 1e-6))
+    elif (
+        price >= float(cfg.ev_discharge_price_threshold)
+        or net_electric_pressure > float(cfg.gt_low_price_pressure_threshold_kw)
+    ):
+        allowed_discharge_kw = max(
+            0.0,
+            (ees_soc - dynamic_min_soc)
+            * float(cfg.ees_e_cap)
+            * float(cfg.ees_eta_dis)
+            / max(float(cfg.dt), 1e-6),
+        )
+        if allowed_discharge_kw > 1e-6:
+            a_ees = -min(1.0, allowed_discharge_kw / max(float(cfg.ees_p_max), 1e-6))
+    elif (
+        price <= float(cfg.ev_charge_price_threshold)
+        and ees_soc < float(cfg.ees_reward_charge_soc_target)
+    ):
+        a_ees = 0.0 if ees_soc >= float(cfg.ees_soc_max) - 1e-6 else 1.0
+
+    if ev_departure_risk:
         a_ev_ch = 1.0
         a_ev_dis = 0.0
-    elif price >= float(cfg.ev_discharge_price_threshold):
-        a_ees = -1.0 if ees_soc > float(cfg.ees_reward_discharge_soc_floor) else 0.0
-        a_gt = 1.0
+    elif price <= float(cfg.ev_charge_price_threshold):
+        a_ev_ch = 1.0
+        a_ev_dis = 0.0
+    elif target_charge_boundary_kw > max(100.0, 0.02 * max_ev_charge_kw):
+        a_ev_ch = 0.5
+        a_ev_dis = 0.0
+
+    if (
+        mode == "v2g"
+        and not ev_departure_risk
+        and price >= float(cfg.ev_discharge_price_threshold)
+        and net_electric_pressure > float(cfg.ev_discharge_pressure_threshold_kw)
+        and discharge_boundary_kw > 1e-6
+    ):
+        a_ev_dis = 1.0
         a_ev_ch = 0.0
-        a_ev_dis = 1.0 if mode == "v2g" else 0.0
 
     if mode == "charge_only":
         a_ev_dis = 0.0
+
+    if (
+        price >= float(cfg.ev_discharge_price_threshold)
+        and net_electric_pressure > float(cfg.gt_low_price_pressure_threshold_kw)
+    ):
+        a_gt = 1.0
+    elif (
+        price <= float(cfg.ev_charge_price_threshold)
+        and net_electric_pressure < float(cfg.gt_low_price_pressure_threshold_kw)
+    ):
+        a_gt = -1.0
+    elif heat_load > 0.75 * float(cfg.heat_load_max):
+        a_gt = 0.5
 
     action = np.array([a_ees, a_gt, a_ev_ch, a_ev_dis], dtype=np.float32)
     action = np.clip(action, inner_env.action_space.low, inner_env.action_space.high)
@@ -279,32 +421,52 @@ def build_daily_summary_row(
     infos: list[dict[str, Any]],
     total_reward: float,
     dt: float,
+    cfg: Any,
 ) -> dict[str, Any]:
     final_info = infos[-1] if infos else {}
-    missing_terminal_info = [
-        key
-        for key in (
-            "final_ees_soc",
-            "ees_soc_init",
-            "terminal_ees_required_soc",
-            "episode_terminal_ees_shortage_kwh",
-            "episode_penalty_terminal_ees_soc",
-            "ees_terminal_soc_feasible",
-        )
-        if key not in final_info
-    ]
-    if missing_terminal_info:
+    if "final_ees_soc" not in final_info:
         print(
-            "WARNING: EES terminal SOC info missing: "
-            f"case_index={case_idx}, missing={missing_terminal_info}; fallback values used.",
+            "WARNING: final_ees_soc missing in terminal info: "
+            f"case_index={case_idx}; falling back to terminal ees_soc.",
             file=sys.stderr,
         )
+    if "ees_soc_init" not in final_info and "ees_soc_episode_init" not in final_info:
+        print(
+            "WARNING: EES initial SOC info missing in terminal info: "
+            f"case_index={case_idx}; falling back to cfg.ees_soc_init.",
+            file=sys.stderr,
+        )
+
     final_ees_soc = float(final_info.get("final_ees_soc", final_info.get("ees_soc", 0.0)))
-    ees_soc_init = float(final_info.get("ees_soc_init", final_info.get("ees_soc_episode_init", 0.0)))
-    terminal_ees_required_soc = float(final_info.get("terminal_ees_required_soc", 0.0))
-    terminal_ees_shortage_kwh = float(final_info.get("episode_terminal_ees_shortage_kwh", 0.0))
-    total_penalty_terminal_ees_soc = float(final_info.get("episode_penalty_terminal_ees_soc", 0.0))
-    ees_terminal_soc_feasible = bool(final_info.get("ees_terminal_soc_feasible", True))
+    ees_soc_init = float(
+        final_info.get(
+            "ees_soc_init",
+            final_info.get("ees_soc_episode_init", float(cfg.ees_soc_init)),
+        )
+    )
+    terminal_ees_required_soc = max(
+        float(cfg.ees_soc_min),
+        ees_soc_init - float(cfg.ees_terminal_soc_tolerance),
+    )
+    terminal_ees_shortage_kwh = (
+        max(0.0, terminal_ees_required_soc - final_ees_soc) * float(cfg.ees_e_cap)
+    )
+    total_penalty_terminal_ees_soc = (
+        terminal_ees_shortage_kwh * float(cfg.penalty_ees_terminal_soc)
+    )
+    ees_terminal_soc_feasible = terminal_ees_shortage_kwh <= 1e-6
+
+    reported_terminal_shortage = final_info.get("episode_terminal_ees_shortage_kwh")
+    if reported_terminal_shortage is not None:
+        reported_terminal_shortage = float(reported_terminal_shortage)
+        if abs(reported_terminal_shortage - terminal_ees_shortage_kwh) > 1e-4:
+            print(
+                "WARNING: Recomputed EES terminal shortage differs from env report: "
+                f"case_index={case_idx}, recomputed={terminal_ees_shortage_kwh:.6f}, "
+                f"reported={reported_terminal_shortage:.6f}",
+                file=sys.stderr,
+            )
+
     row = {
         "case_index": int(case_idx),
         "month": case.month,
@@ -499,10 +661,43 @@ def safe_mean(pd, df, column: str) -> float:
     return float(series.mean())
 
 
+def safe_min(pd, df, column: str) -> float:
+    series = numeric_series(pd, df, column).dropna()
+    if series.empty:
+        return float("nan")
+    return float(series.min())
+
+
+def boolean_series(pd, df, column: str):
+    if column not in df.columns:
+        return pd.Series([False] * len(df), index=df.index, dtype=bool)
+    series = df[column]
+    if str(series.dtype) == "bool":
+        return series.fillna(False).astype(bool)
+    lowered = series.astype(str).str.strip().str.lower()
+    return lowered.isin({"true", "1", "yes", "y"})
+
+
+def terminal_ees_feasible_mask(pd, df):
+    if df.empty:
+        return pd.Series(dtype=bool)
+    feasible = boolean_series(pd, df, "ees_terminal_soc_feasible")
+    if "terminal_ees_shortage_kwh" in df.columns:
+        shortage_ok = (
+            numeric_series(pd, df, "terminal_ees_shortage_kwh")
+            .fillna(float("inf"))
+            .le(1e-6)
+        )
+        feasible = feasible & shortage_ok
+    return feasible.astype(bool)
+
+
 def aggregate_method_summary(pd, df, method: str) -> dict[str, Any]:
     system_cost = numeric_series(pd, df, "total_system_cost")
     penalties = numeric_series(pd, df, "total_penalties")
     cost_plus_penalty = (system_cost.fillna(0.0) + penalties.fillna(0.0)).dropna()
+    terminal_feasible = terminal_ees_feasible_mask(pd, df)
+    terminal_ees_feasible_days = int(terminal_feasible.sum()) if len(df) > 0 else 0
 
     row = {
         "method": method,
@@ -530,6 +725,25 @@ def aggregate_method_summary(pd, df, method: str) -> dict[str, Any]:
             pd, df, "total_ev_buffer_charge_kwh"
         ),
         "mean_final_ees_soc": safe_mean(pd, df, "final_ees_soc"),
+        "terminal_ees_feasible_days": terminal_ees_feasible_days,
+        "terminal_ees_feasible_ratio": terminal_ees_feasible_days / max(int(len(df)), 1),
+        "min_final_ees_soc": safe_min(pd, df, "final_ees_soc"),
+        "sum_terminal_ees_shortage_kwh": safe_sum(
+            pd, df, "terminal_ees_shortage_kwh"
+        ),
+        "sum_penalty_terminal_ees_soc": safe_sum(
+            pd, df, "total_penalty_terminal_ees_soc"
+        ),
+        "total_depart_energy_shortage_kwh": safe_sum(
+            pd, df, "total_depart_energy_shortage_kwh"
+        ),
+        "total_unmet_e": safe_sum(pd, df, "total_unmet_e"),
+        "total_unmet_h": safe_sum(pd, df, "total_unmet_h"),
+        "total_unmet_c": safe_sum(pd, df, "total_unmet_c"),
+        "total_grid_sell_kwh": safe_sum(pd, df, "total_grid_sell_kwh"),
+        "total_penalty_ev_export_guard": safe_sum(
+            pd, df, "total_penalty_ev_export_guard"
+        ),
     }
     return {column: row.get(column, float("nan")) for column in COMPARISON_COLUMNS}
 
@@ -605,7 +819,30 @@ def write_diagnostics_report(
 
     final_ees_soc = numeric_series(pd, summary_df, "final_ees_soc").dropna()
     final_ees_soc_min = float(final_ees_soc.min()) if not final_ees_soc.empty else float("nan")
+    final_ees_soc_mean = float(final_ees_soc.mean()) if not final_ees_soc.empty else float("nan")
     final_ees_soc_max = float(final_ees_soc.max()) if not final_ees_soc.empty else float("nan")
+    terminal_feasible_mask = terminal_ees_feasible_mask(pd, summary_df)
+    terminal_shortage = numeric_series(
+        pd, summary_df, "terminal_ees_shortage_kwh"
+    ).reindex(summary_df.index).fillna(float("inf"))
+    terminal_ees_violation_mask = (
+        (~terminal_feasible_mask.reindex(summary_df.index, fill_value=False))
+        | (terminal_shortage > 1e-6)
+    )
+    terminal_ees_feasible_days = int(
+        len(summary_df) - int(terminal_ees_violation_mask.sum())
+    )
+    terminal_ees_feasible_ratio = terminal_ees_feasible_days / max(n_days, 1)
+    sum_terminal_ees_shortage_kwh = safe_sum(
+        pd, summary_df, "terminal_ees_shortage_kwh"
+    )
+    sum_penalty_terminal_ees_soc = safe_sum(
+        pd, summary_df, "total_penalty_terminal_ees_soc"
+    )
+    terminal_ees_ok = bool(
+        terminal_ees_violation_mask.sum() == 0
+        and sum_terminal_ees_shortage_kwh <= 1e-6
+    )
 
     ees_soc_series = numeric_series(pd, timeseries_df, "ees_soc").dropna()
     ees_soc_out_of_bounds = False
@@ -642,6 +879,7 @@ def write_diagnostics_report(
         f"- finite_daily_summary: {mark(not has_nan and not has_inf)} - has_nan={has_nan}, has_inf={has_inf}",
         f"- unmet_energy: {mark(total_unmet <= DIAGNOSTIC_TOL)} - total_unmet_e/h/c={total_unmet_e:.6f}/{total_unmet_h:.6f}/{total_unmet_c:.6f}",
         f"- ev_departure_shortage: {mark(total_depart_shortage <= DIAGNOSTIC_TOL)} - total_depart_energy_shortage_kwh={total_depart_shortage:.6f}",
+        f"- ees_terminal_soc: {mark(terminal_ees_ok)} - feasible_days={terminal_ees_feasible_days}/{n_days}, shortage_kwh={sum_terminal_ees_shortage_kwh:.6f}, penalty={sum_penalty_terminal_ees_soc:.6f}",
         f"- ees_soc_bounds: {mark(not ees_soc_out_of_bounds)} - configured bounds=[{cfg.ees_soc_min:.6f}, {cfg.ees_soc_max:.6f}]",
         f"- penalty_scale: {mark(not penalty_too_large)} - max penalty/system_cost ratio={float(penalty_ratio.max()) if not penalty_ratio.empty else float('nan'):.6f}",
         "",
@@ -655,7 +893,12 @@ def write_diagnostics_report(
         f"- total_grid_buy_kwh_sum: {total_grid_buy:.6f}",
         f"- total_grid_sell_kwh_sum: {total_grid_sell:.6f}",
         f"- final_ees_soc_min: {final_ees_soc_min:.6f}",
+        f"- final_ees_soc_mean: {final_ees_soc_mean:.6f}",
         f"- final_ees_soc_max: {final_ees_soc_max:.6f}",
+        f"- terminal_ees_feasible_days: {terminal_ees_feasible_days}",
+        f"- terminal_ees_feasible_ratio: {terminal_ees_feasible_ratio:.6f}",
+        f"- terminal_ees_shortage_kwh_sum: {sum_terminal_ees_shortage_kwh:.6f}",
+        f"- penalty_terminal_ees_soc_sum: {sum_penalty_terminal_ees_soc:.6f}",
     ]
     if total_gt_safe_infeasible is not None:
         lines.append(
@@ -671,8 +914,44 @@ def write_diagnostics_report(
             f"- large_ev_departure_shortage: {'yes' if total_depart_shortage > DIAGNOSTIC_TOL else 'no'}",
             f"- large_penalties: {'yes' if penalty_too_large else 'no'}",
             f"- ees_soc_out_of_bounds: {'yes' if ees_soc_out_of_bounds else 'no'}",
+            f"- ees_terminal_soc_violation: {'yes' if not terminal_ees_ok else 'no'}",
         ]
     )
+
+    violation_cases = summary_df.loc[
+        terminal_ees_violation_mask,
+        [
+            column
+            for column in (
+                "case_index",
+                "final_ees_soc",
+                "terminal_ees_required_soc",
+                "terminal_ees_shortage_kwh",
+                "total_penalty_terminal_ees_soc",
+            )
+            if column in summary_df.columns
+        ],
+    ]
+    lines.extend(["", "## EES terminal SOC violations"])
+    if violation_cases.empty:
+        lines.append("- none")
+    else:
+        lines.extend(
+            [
+                "",
+                "| case_index | final_ees_soc | terminal_ees_required_soc | terminal_ees_shortage_kwh | total_penalty_terminal_ees_soc |",
+                "|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for _, item in violation_cases.iterrows():
+            lines.append(
+                "| "
+                f"{int(item.get('case_index', -1))} | "
+                f"{float(item.get('final_ees_soc', float('nan'))):.6f} | "
+                f"{float(item.get('terminal_ees_required_soc', float('nan'))):.6f} | "
+                f"{float(item.get('terminal_ees_shortage_kwh', float('nan'))):.6f} | "
+                f"{float(item.get('total_penalty_terminal_ees_soc', float('nan'))):.6f} |"
+            )
 
     if comparison_df is not None and not comparison_df.empty:
         lines.extend(
@@ -818,6 +1097,7 @@ def main() -> None:
                 infos=infos,
                 total_reward=total_reward,
                 dt=cfg.dt,
+                cfg=cfg,
             )
             summary_rows.append(summary_row)
             for step_info in infos:
@@ -911,6 +1191,31 @@ def main() -> None:
         "Total depart energy shortage (kWh): "
         f"{safe_sum(pd, summary_df, 'total_depart_energy_shortage_kwh'):.4f}"
     )
+    key_metrics = aggregate_method_summary(pd, summary_df, method_label(args.ev_mode))
+    print("\n========== Rule-based-V2G SCI Baseline Metrics ==========")
+    for metric in (
+        "method",
+        "n_days",
+        "mean_total_system_cost",
+        "mean_total_penalties",
+        "mean_total_cost_plus_penalty",
+        "terminal_ees_feasible_days",
+        "terminal_ees_feasible_ratio",
+        "min_final_ees_soc",
+        "sum_terminal_ees_shortage_kwh",
+        "sum_penalty_terminal_ees_soc",
+        "total_depart_energy_shortage_kwh",
+        "total_unmet_e",
+        "total_unmet_h",
+        "total_unmet_c",
+        "total_grid_sell_kwh",
+        "total_penalty_ev_export_guard",
+    ):
+        value = key_metrics.get(metric)
+        if isinstance(value, float):
+            print(f"{metric}: {value:.6f}")
+        else:
+            print(f"{metric}: {value}")
     print(f"Alert rows exported: {len(alert_rows)}")
     print(f"Output directory: {output_dir}")
 
