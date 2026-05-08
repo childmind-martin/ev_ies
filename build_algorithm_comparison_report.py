@@ -49,6 +49,7 @@ EPS = 1e-9
 METHOD_COLORS = {
     "Rule-based-V2G": "#7F7F7F",
     "PPO": "#4E79A7",
+    "DDPG": "#9467BD",
     "TD3": "#F28E2B",
     "LSTM-TD3": "#59A14F",
 }
@@ -179,6 +180,14 @@ METHODS = [
         training_export_xlsx=BASE_DIR / "results" / "ppo_sb3_direct_training" / "ppo_sb3_direct_training_export.xlsx",
         training_episode_csv=BASE_DIR / "results" / "ppo_sb3_direct_training" / "episode_summary.csv",
         eval_npz_path=BASE_DIR / "logs" / "ppo_sb3_direct" / "evaluations.npz",
+    ),
+    MethodConfig(
+        method="DDPG",
+        test_dir=BASE_DIR / "results" / "ddpg_yearly_test",
+        training_dir=BASE_DIR / "results" / "ddpg_yearly_training",
+        training_export_xlsx=BASE_DIR / "results" / "ddpg_yearly_training" / "ddpg_training_export.xlsx",
+        training_episode_csv=BASE_DIR / "results" / "ddpg_yearly_training" / "episode_summary.csv",
+        eval_npz_path=BASE_DIR / "logs" / "ddpg_yearly_single" / "evaluations.npz",
     ),
     MethodConfig(
         method="TD3",

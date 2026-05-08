@@ -19,10 +19,17 @@ except Exception:
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_TD3_SUMMARY = BASE_DIR / "results" / "td3_yearly_test" / "daily_summary.csv"
 DEFAULT_PPO_SUMMARY = BASE_DIR / "results" / "ppo_sb3_direct_test" / "daily_summary.csv"
+DEFAULT_DDPG_SUMMARY = BASE_DIR / "results" / "ddpg_yearly_test" / "daily_summary.csv"
 DEFAULT_RULE_SUMMARY = BASE_DIR / "results" / "rule_based_v2g_test" / "daily_summary.csv"
-DEFAULT_OUTPUT_DIR = BASE_DIR / "results" / "td3_ppo_rule_based_test_comparison"
+DEFAULT_OUTPUT_DIR = BASE_DIR / "results" / "comparison"
 
-METHOD_ORDER = ["TD3", "PPO", "Rule-based-V2G"]
+METHOD_ORDER = ["TD3", "PPO", "DDPG", "Rule-based-V2G"]
+METHOD_COLORS = {
+    "TD3": "#F28E2B",
+    "PPO": "#4E79A7",
+    "DDPG": "#9467BD",
+    "Rule-based-V2G": "#7F7F7F",
+}
 
 AGG_METRICS = [
     "total_system_cost",
@@ -73,10 +80,11 @@ REQUIRED_COLUMNS = [
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Compare TD3, PPO, and Rule-based test-set daily summaries."
+        description="Compare TD3, PPO, DDPG, and Rule-based test-set daily summaries."
     )
     parser.add_argument("--td3-summary", type=Path, default=DEFAULT_TD3_SUMMARY)
     parser.add_argument("--ppo-summary", type=Path, default=DEFAULT_PPO_SUMMARY)
+    parser.add_argument("--ddpg-summary", type=Path, default=DEFAULT_DDPG_SUMMARY)
     parser.add_argument("--rule-summary", type=Path, default=DEFAULT_RULE_SUMMARY)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument(
@@ -192,12 +200,14 @@ def write_report(
     method_summary: pd.DataFrame,
 ) -> None:
     lines = [
-        "# TD3 / PPO / Rule-based test comparison",
+        "# TD3 / PPO / DDPG / Rule-based test comparison",
         "",
         f"- loaded_methods: {', '.join(loaded_methods) if loaded_methods else 'none'}",
         f"- missing_methods: {', '.join(missing_methods) if missing_methods else 'none'}",
         "",
-        "Guide reward is not treated as real economic revenue. Focus on system cost, penalties, cost plus penalties, grid exchange, service shortage, EV departure shortage, and storage support.",
+        "Guide reward is not treated as real economic revenue.",
+        "",
+        "Main comparison uses system cost, penalties, cost plus penalties, grid exchange, shortage, EV departure shortage, and EES terminal SOC feasibility.",
         "",
         "## Method Summary",
         "",
@@ -289,10 +299,9 @@ def plot_method_summary(method_summary: pd.DataFrame, output_path: Path) -> bool
         axes = [axes]
 
     methods = method_summary["method"].astype(str).tolist()
-    colors = ["#4E79A7", "#F28E2B", "#59A14F", "#B07AA1"]
     for ax, column in zip(axes, plot_cols):
         values = pd.to_numeric(method_summary[column], errors="coerce").fillna(0.0)
-        ax.bar(methods, values, color=colors[: len(methods)])
+        ax.bar(methods, values, color=[METHOD_COLORS.get(method, "#999999") for method in methods])
         ax.set_title(column)
         ax.grid(axis="y", alpha=0.25)
         for idx, value in enumerate(values):
@@ -320,7 +329,7 @@ def collect_summaries(paths: dict[str, Path], allow_missing: bool):
             errors.append(str(exc))
             if not allow_missing:
                 raise RuntimeError(
-                    "Cannot build a three-method comparison because one or more summaries are unavailable.\n"
+                    "Cannot build a method comparison because one or more summaries are unavailable.\n"
                     + "\n".join(errors)
                     + "\nRun missing test scripts first, or pass --allow-missing to compare available methods."
                 ) from exc
@@ -335,6 +344,7 @@ def main() -> None:
     paths = {
         "TD3": args.td3_summary,
         "PPO": args.ppo_summary,
+        "DDPG": args.ddpg_summary,
         "Rule-based-V2G": args.rule_summary,
     }
     loaded, loaded_methods, missing_methods, errors = collect_summaries(
