@@ -31,6 +31,7 @@ BUFFER_SIZE = 100000
 LEARNING_STARTS = 1_000
 BATCH_SIZE = 256
 LEARNING_RATE = 1.5e-4
+GAMMA = 0.99
 TAU = 0.005
 POLICY_DELAY = 2
 TRAIN_FREQ = 1
@@ -39,6 +40,10 @@ EVAL_FREQ = 5000
 SAVE_FREQ = 5000
 REWARD_SCALE = 1e-5
 VAL_DAYS_PER_MONTH = 2
+ACTION_NOISE_TYPE = "None"
+ACTION_NOISE_SIGMA = 0.0
+TARGET_POLICY_NOISE = 0.20
+TARGET_NOISE_CLIP = 0.50
 
 POLICY_NAME = "MlpPolicy"
 POLICY_NET_ARCH_PI = [256, 256]
@@ -171,7 +176,8 @@ EPISODE_SUMMARY_COLUMNS = (
 CONFIG_COLUMNS = (
     "run_id", "timestamp_start", "yearly_csv_path", "yearly_ev_path", "n_train_cases", "n_val_cases", "n_test_cases",
     "training_duration_seconds", "training_duration_hms",
-    "TOTAL_EPISODES", "TOTAL_TIMESTEPS", "SEED", "BUFFER_SIZE", "LEARNING_STARTS", "BATCH_SIZE", "LEARNING_RATE", "TAU", "POLICY_DELAY",
+    "TOTAL_EPISODES", "TOTAL_TIMESTEPS", "SEED", "BUFFER_SIZE", "LEARNING_STARTS", "BATCH_SIZE", "LEARNING_RATE", "GAMMA", "TAU", "POLICY_DELAY",
+    "ACTION_NOISE_TYPE", "ACTION_NOISE_SIGMA", "TARGET_POLICY_NOISE", "TARGET_NOISE_CLIP",
     "TRAIN_FREQ", "GRADIENT_STEPS", "EVAL_FREQ", "SAVE_FREQ", "VAL_DAYS_PER_MONTH", "REWARD_SCALE",
     "policy", "net_arch_pi", "net_arch_qf", "activation_fn", "device",
     "episode_length", "dt", "future_horizon", "exogenous_future_horizon", "grid_import_max", "grid_export_max",
@@ -229,7 +235,7 @@ def infer_unit(column_name: str) -> str:
         return "count"
     if column_name in {"month", "day_of_year"}:
         return "index"
-    if column_name in {"season", "split", "policy", "activation_fn", "device", "run_id"}:
+    if column_name in {"season", "split", "policy", "activation_fn", "device", "run_id", "ACTION_NOISE_TYPE"}:
         return "label"
     if column_name == "timestamp_start":
         return "datetime"
@@ -367,7 +373,10 @@ def build_config_row(cfg: Any, *, run_id: str, timestamp_start: str, n_train_cas
         "n_train_cases": int(n_train_cases), "n_val_cases": int(n_val_cases), "n_test_cases": int(n_test_cases),
         "training_duration_seconds": None, "training_duration_hms": "",
         "TOTAL_EPISODES": TOTAL_EPISODES, "TOTAL_TIMESTEPS": TOTAL_TIMESTEPS, "SEED": SEED, "BUFFER_SIZE": BUFFER_SIZE, "LEARNING_STARTS": LEARNING_STARTS, "BATCH_SIZE": BATCH_SIZE,
-        "LEARNING_RATE": LEARNING_RATE, "TAU": TAU, "POLICY_DELAY": POLICY_DELAY, "TRAIN_FREQ": TRAIN_FREQ, "GRADIENT_STEPS": GRADIENT_STEPS,
+        "LEARNING_RATE": LEARNING_RATE, "GAMMA": GAMMA, "TAU": TAU, "POLICY_DELAY": POLICY_DELAY,
+        "ACTION_NOISE_TYPE": ACTION_NOISE_TYPE, "ACTION_NOISE_SIGMA": ACTION_NOISE_SIGMA,
+        "TARGET_POLICY_NOISE": TARGET_POLICY_NOISE, "TARGET_NOISE_CLIP": TARGET_NOISE_CLIP,
+        "TRAIN_FREQ": TRAIN_FREQ, "GRADIENT_STEPS": GRADIENT_STEPS,
         "EVAL_FREQ": EVAL_FREQ, "SAVE_FREQ": SAVE_FREQ, "VAL_DAYS_PER_MONTH": VAL_DAYS_PER_MONTH, "REWARD_SCALE": REWARD_SCALE,
         "policy": POLICY_NAME, "net_arch_pi": str(POLICY_NET_ARCH_PI), "net_arch_qf": str(POLICY_NET_ARCH_QF), "activation_fn": ACTIVATION_FN_NAME, "device": device,
         "episode_length": cfg_values["episode_length"], "dt": cfg_values["dt"], "future_horizon": cfg_values["future_horizon"], "exogenous_future_horizon": cfg_values["exogenous_future_horizon"],
@@ -605,8 +614,13 @@ def main() -> None:
     print(f"  learning_starts = {LEARNING_STARTS}")
     print(f"  batch_size = {BATCH_SIZE}")
     print(f"  learning_rate = {LEARNING_RATE}")
+    print(f"  gamma = {GAMMA}")
     print(f"  tau = {TAU}")
     print(f"  policy_delay = {POLICY_DELAY}")
+    print(f"  action_noise_type = None (original TD3: no explicit exploration action noise)")
+    print(f"  action_noise_sigma = {ACTION_NOISE_SIGMA}")
+    print(f"  target_policy_noise = {TARGET_POLICY_NOISE}")
+    print(f"  target_noise_clip = {TARGET_NOISE_CLIP}")
     print(f"  val_days_per_month = {VAL_DAYS_PER_MONTH}")
     print(f"  n_eval_episodes = {n_eval_episodes}")
     print(f"  obs_dim = {probe_env.obs_dim}")
@@ -629,11 +643,15 @@ def main() -> None:
         policy=POLICY_NAME,
         env=train_env,
         learning_rate=LEARNING_RATE,
+        gamma=GAMMA,
         buffer_size=BUFFER_SIZE,
         learning_starts=LEARNING_STARTS,
         batch_size=BATCH_SIZE,
         tau=TAU,
         policy_delay=POLICY_DELAY,
+        # TD3 target policy smoothing noise is separate from exploration action_noise.
+        target_policy_noise=TARGET_POLICY_NOISE,
+        target_noise_clip=TARGET_NOISE_CLIP,
         train_freq=TRAIN_FREQ,
         gradient_steps=GRADIENT_STEPS,
         policy_kwargs=dict(net_arch=dict(pi=POLICY_NET_ARCH_PI, qf=POLICY_NET_ARCH_QF), activation_fn=th.nn.ReLU),
