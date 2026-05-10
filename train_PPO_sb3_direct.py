@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import importlib.util
 import random
@@ -35,9 +36,12 @@ RESULT_DIR = Path("./results/ppo_sb3_direct_training")
 CONFIG_CSV = RESULT_DIR / "train_config.csv"
 TRAINING_EXPORT_XLSX = RESULT_DIR / "ppo_sb3_direct_training_export.xlsx"
 TRAINING_STEP_DETAIL_CSV = RESULT_DIR / "ppo_sb3_direct_training_step_detail.csv"
+TRAINING_EPISODE_SUMMARY_CSV = RESULT_DIR / "episode_summary.csv"
 TRAINING_RUNTIME_SUMMARY_JSON = RESULT_DIR / "training_runtime_summary.json"
 
 SEED = 42
+DEFAULT_SEED = SEED
+RUN_NAME = "main"
 TOTAL_EPISODES = 4000
 TOTAL_TIMESTEPS = TOTAL_EPISODES * 24
 N_STEPS = 768
@@ -60,6 +64,53 @@ POLICY_NET_ARCH_PI = [256, 256]
 POLICY_NET_ARCH_VF = [256, 256]
 ACTIVATION_FN_NAME = "ReLU"
 REQUESTED_DEVICE = "auto"
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train PPO on the yearly Park IES task.")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Random seed for this training run.")
+    parser.add_argument("--run-name", type=str, default=None, help="Run label; seed runs use isolated seed-specific outputs.")
+    parser.add_argument("--device", type=str, default=REQUESTED_DEVICE, help="SB3/PyTorch device: auto, cpu, cuda, cuda:0, etc.")
+    parser.add_argument("--total-episodes", type=int, default=None, help="Override TOTAL_EPISODES for short benchmark runs.")
+    return parser.parse_args(argv)
+
+
+def make_run_suffix(run_name: str | None, seed: int) -> str:
+    if run_name is None:
+        return f"seed_{seed}"
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in run_name.strip())
+    return cleaned or f"seed_{seed}"
+
+
+def apply_runtime_args(args: argparse.Namespace) -> None:
+    global SEED, RUN_NAME, REQUESTED_DEVICE, TOTAL_EPISODES, TOTAL_TIMESTEPS
+    global MODEL_DIR, BEST_MODEL_DIR, CHECKPOINT_DIR, LOG_DIR, TB_DIR, RESULT_DIR
+    global CONFIG_CSV, TRAINING_EXPORT_XLSX, TRAINING_STEP_DETAIL_CSV, TRAINING_EPISODE_SUMMARY_CSV, TRAINING_RUNTIME_SUMMARY_JSON
+
+    SEED = int(args.seed)
+    RUN_NAME = args.run_name or ("main" if SEED == DEFAULT_SEED else f"seed_{SEED}")
+    REQUESTED_DEVICE = str(args.device).strip() or "auto"
+    if args.total_episodes is not None:
+        if int(args.total_episodes) <= 0:
+            raise ValueError("--total-episodes must be positive.")
+        TOTAL_EPISODES = int(args.total_episodes)
+        TOTAL_TIMESTEPS = TOTAL_EPISODES * 24
+
+    if args.run_name is None and SEED == DEFAULT_SEED:
+        return
+
+    run_suffix = make_run_suffix(args.run_name, SEED)
+    MODEL_DIR = Path(f"./models/ppo_sb3_direct_{run_suffix}")
+    BEST_MODEL_DIR = MODEL_DIR / "best"
+    CHECKPOINT_DIR = MODEL_DIR / "checkpoints"
+    LOG_DIR = Path(f"./logs/ppo_sb3_direct_{run_suffix}")
+    TB_DIR = Path(f"./tb/ppo_sb3_direct_{run_suffix}")
+    RESULT_DIR = Path(f"./results/ppo_sb3_direct_training_{run_suffix}")
+    CONFIG_CSV = RESULT_DIR / "train_config.csv"
+    TRAINING_EXPORT_XLSX = RESULT_DIR / "ppo_sb3_direct_training_export.xlsx"
+    TRAINING_STEP_DETAIL_CSV = RESULT_DIR / "ppo_sb3_direct_training_step_detail.csv"
+    TRAINING_EPISODE_SUMMARY_CSV = RESULT_DIR / "episode_summary.csv"
+    TRAINING_RUNTIME_SUMMARY_JSON = RESULT_DIR / "training_runtime_summary.json"
 
 CONFIG_COLUMNS = (
     "run_id", "timestamp_start", "algorithm",
@@ -156,6 +207,13 @@ def set_random_seed(seed: int, np, th) -> None:
     th.manual_seed(seed)
     if th.cuda.is_available():
         th.cuda.manual_seed_all(seed)
+    if hasattr(th.backends, "cudnn"):
+        th.backends.cudnn.benchmark = False
+        th.backends.cudnn.deterministic = True
+    try:
+        th.use_deterministic_algorithms(True, warn_only=True)
+    except Exception as exc:
+        print(f"[startup] Warning: could not enable deterministic torch algorithms: {exc}")
 
 
 def resolve_sb3_device(th, requested_device: str) -> str:
@@ -178,9 +236,11 @@ def print_torch_runtime_summary(th, *, requested_device: str, resolved_device: s
     print(f"  resolved_device = {resolved_device}")
     print(f"  cuda_available = {th.cuda.is_available()}")
     print(f"  cuda_version = {th.version.cuda}")
+    print(f"  deterministic_algorithms = {th.are_deterministic_algorithms_enabled()}")
     if th.cuda.is_available():
         print(f"  cuda_device_count = {th.cuda.device_count()}")
         print(f"  cuda_device_name = {th.cuda.get_device_name(0)}")
+        print(f"  cudnn_version = {th.backends.cudnn.version()}")
     else:
         print("  note = CUDA unavailable, so PPO will run on CPU.")
 
@@ -372,6 +432,7 @@ def build_training_export_callback(
     pd,
     output_path: Path,
     step_csv_path: Path,
+    episode_csv_path: Path,
     excel_engine: str,
     config_row: dict[str, Any],
 ):
@@ -474,22 +535,27 @@ def build_training_export_callback(
 
             output_path.parent.mkdir(parents=True, exist_ok=True)
             step_csv_path.parent.mkdir(parents=True, exist_ok=True)
+            episode_csv_path.parent.mkdir(parents=True, exist_ok=True)
             step_df = pd.DataFrame(self.step_rows, columns=STEP_DETAIL_COLUMNS)
             episode_df = pd.DataFrame(self.episode_rows, columns=EPISODE_SUMMARY_COLUMNS)
             config_df = pd.DataFrame([{column: config_row.get(column) for column in CONFIG_COLUMNS}], columns=CONFIG_COLUMNS)
             description_df = pd.DataFrame(column_description_rows, columns=["sheet", "column_name", "unit", "meaning", "source"])
             step_df.to_csv(step_csv_path, index=False, encoding="utf-8-sig")
+            episode_df.to_csv(episode_csv_path, index=False, encoding="utf-8-sig")
             with pd.ExcelWriter(output_path, engine=excel_engine) as writer:
                 episode_df.to_excel(writer, sheet_name="episode_summary", index=False)
                 config_df.to_excel(writer, sheet_name="config", index=False)
                 description_df.to_excel(writer, sheet_name="column_description", index=False)
             print(f"[export] PPO training step_detail CSV saved to: {step_csv_path.resolve()}")
+            print(f"[export] PPO training episode_summary CSV saved to: {episode_csv_path.resolve()}")
             print(f"[export] PPO training workbook saved to: {output_path.resolve()}")
 
     return TrainingExportCallback()
 
 
 def main() -> None:
+    args = parse_args()
+    apply_runtime_args(args)
     configure_stdio()
     try:
         excel_engine = preflight_check()
@@ -541,6 +607,8 @@ def main() -> None:
     probe_case = val_cases[0] if val_cases else train_cases[0]
     probe_ev_data = ev_provider(probe_case)
     probe_env = ParkIESEnv(cfg=cfg, ts_data=probe_case.ts_data, ev_data=probe_ev_data)
+    print(f"  run_name = {RUN_NAME}")
+    print(f"  seed = {SEED}")
     obs_dim = int(probe_env.obs_dim)
     action_dim = int(probe_env.action_space.shape[0])
     print("[startup] PPO config aligned with current TD3 environment:")
@@ -651,6 +719,7 @@ def main() -> None:
         pd=pd,
         output_path=TRAINING_EXPORT_XLSX,
         step_csv_path=TRAINING_STEP_DETAIL_CSV,
+        episode_csv_path=TRAINING_EPISODE_SUMMARY_CSV,
         excel_engine=excel_engine,
         config_row=config_row,
     )
@@ -671,6 +740,7 @@ def main() -> None:
             f"({training_export_callback.training_duration_seconds:.3f} s)"
         )
     print(f"PPO training step_detail CSV exported to: {TRAINING_STEP_DETAIL_CSV.resolve()}")
+    print(f"PPO training episode_summary CSV exported to: {TRAINING_EPISODE_SUMMARY_CSV.resolve()}")
     print(f"PPO training workbook exported to: {TRAINING_EXPORT_XLSX.resolve()}")
     print(f"PPO training config exported to: {CONFIG_CSV.resolve()}")
     runtime_row = write_training_runtime_summary(

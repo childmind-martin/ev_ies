@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import importlib.util
 import json
@@ -15,18 +16,58 @@ from typing import Any
 YEARLY_CSV_PATH = Path(r"D:\wangye\chengxu\3.30\yearly_data_sci.csv")
 YEARLY_EV_PATH = Path(r"D:\wangye\chengxu\3.30\ev_data_s123_bilevel.npy")
 MODEL_PATH = Path("./models/td3_yearly_single/best/best_model.zip")
+DEFAULT_MODEL_PATH = MODEL_PATH
 
 RESULT_DIR = Path("./results/td3_yearly_test")
+DEFAULT_RESULT_DIR = RESULT_DIR
 SUMMARY_CSV = RESULT_DIR / "daily_summary.csv"
 TIMESERIES_CSV = RESULT_DIR / "timeseries_detail.csv"
 TEST_EXPORT_XLSX = RESULT_DIR / "td3_test_export.xlsx"
 RUNTIME_SUMMARY_JSON = RESULT_DIR / "runtime_summary.json"
 
 SEED = 42
+DEFAULT_SEED = SEED
+RUN_NAME = "main"
 VAL_DAYS_PER_MONTH = 2
 REWARD_SCALE = 1e-5
 ALERT_TOL = 1e-8
 REQUESTED_DEVICE = "auto"
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Test TD3 on the yearly Park IES task.")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Random seed for this test run.")
+    parser.add_argument("--run-name", type=str, default=None, help="Run label; seed runs use isolated seed-specific outputs.")
+    parser.add_argument("--device", type=str, default=REQUESTED_DEVICE, help="SB3/PyTorch device for model inference: auto, cpu, cuda, cuda:0, etc.")
+    return parser.parse_args(argv)
+
+
+def make_run_suffix(run_name: str | None, seed: int) -> str:
+    if run_name is None:
+        return f"seed_{seed}"
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in run_name.strip())
+    return cleaned or f"seed_{seed}"
+
+
+def apply_runtime_args(args: argparse.Namespace) -> None:
+    global SEED, RUN_NAME, REQUESTED_DEVICE, MODEL_PATH, RESULT_DIR, SUMMARY_CSV, TIMESERIES_CSV, TEST_EXPORT_XLSX, RUNTIME_SUMMARY_JSON
+
+    SEED = int(args.seed)
+    RUN_NAME = args.run_name or ("main" if SEED == DEFAULT_SEED else f"seed_{SEED}")
+    REQUESTED_DEVICE = str(args.device).strip() or "auto"
+
+    if args.run_name is None and SEED == DEFAULT_SEED:
+        MODEL_PATH = DEFAULT_MODEL_PATH
+        RESULT_DIR = DEFAULT_RESULT_DIR
+    else:
+        run_suffix = make_run_suffix(args.run_name, SEED)
+        MODEL_PATH = Path(f"./models/td3_yearly_single_{run_suffix}/best/best_model.zip")
+        RESULT_DIR = Path(f"./results/td3_yearly_test_{run_suffix}")
+
+    SUMMARY_CSV = RESULT_DIR / "daily_summary.csv"
+    TIMESERIES_CSV = RESULT_DIR / "timeseries_detail.csv"
+    TEST_EXPORT_XLSX = RESULT_DIR / "td3_test_export.xlsx"
+    RUNTIME_SUMMARY_JSON = RESULT_DIR / "runtime_summary.json"
 
 STEP_DETAIL_COLUMNS = (
     "case_index", "month", "day_of_year", "season", "split",
@@ -598,6 +639,8 @@ def write_runtime_summary(
 
 
 def main() -> None:
+    args = parse_args()
+    apply_runtime_args(args)
     configure_stdio()
 
     try:
@@ -639,6 +682,8 @@ def main() -> None:
     probe_case = test_cases[0]
     probe_ev_data = ev_provider(probe_case)
     probe_env = ParkIESEnv(cfg=cfg, ts_data=probe_case.ts_data, ev_data=probe_ev_data)
+    print(f"  run_name = {RUN_NAME}")
+    print(f"  seed = {SEED}")
     print("[startup] 鏈娴嬭瘯鐜閰嶇疆:")
     print(f"  reward_scale = {cfg.reward_scale}")
     print(f"  obs_dim = {probe_env.obs_dim}")

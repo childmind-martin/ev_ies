@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import random
@@ -26,6 +27,8 @@ TRAINING_EPISODE_SUMMARY_CSV = RESULT_DIR / "episode_summary.csv"
 TRAINING_RUNTIME_SUMMARY_JSON = RESULT_DIR / "training_runtime_summary.json"
 
 SEED = 42
+DEFAULT_SEED = SEED
+RUN_NAME = "main"
 TOTAL_EPISODES = 4000
 TOTAL_TIMESTEPS = TOTAL_EPISODES * 24
 BUFFER_SIZE = 100000
@@ -48,6 +51,52 @@ POLICY_NET_ARCH_PI = [256, 256]
 POLICY_NET_ARCH_QF = [256, 256]
 ACTIVATION_FN_NAME = "ReLU"
 REQUESTED_DEVICE = "auto"
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train DDPG on the yearly Park IES task.")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Random seed for this training run.")
+    parser.add_argument("--run-name", type=str, default=None, help="Run label; seed runs use isolated seed-specific outputs.")
+    parser.add_argument("--device", type=str, default=REQUESTED_DEVICE, help="SB3/PyTorch device: auto, cpu, cuda, cuda:0, etc.")
+    parser.add_argument("--total-episodes", type=int, default=None, help="Override TOTAL_EPISODES for short benchmark runs.")
+    return parser.parse_args(argv)
+
+
+def make_run_suffix(run_name: str | None, seed: int) -> str:
+    if run_name is None:
+        return f"seed_{seed}"
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in run_name.strip())
+    return cleaned or f"seed_{seed}"
+
+
+def apply_runtime_args(args: argparse.Namespace) -> None:
+    global SEED, RUN_NAME, REQUESTED_DEVICE, TOTAL_EPISODES, TOTAL_TIMESTEPS
+    global MODEL_DIR, BEST_MODEL_DIR, CHECKPOINT_DIR, LOG_DIR, TB_DIR, RESULT_DIR
+    global TRAINING_EXPORT_XLSX, TRAINING_STEP_DETAIL_CSV, TRAINING_EPISODE_SUMMARY_CSV, TRAINING_RUNTIME_SUMMARY_JSON
+
+    SEED = int(args.seed)
+    RUN_NAME = args.run_name or ("main" if SEED == DEFAULT_SEED else f"seed_{SEED}")
+    REQUESTED_DEVICE = str(args.device).strip() or "auto"
+    if args.total_episodes is not None:
+        if int(args.total_episodes) <= 0:
+            raise ValueError("--total-episodes must be positive.")
+        TOTAL_EPISODES = int(args.total_episodes)
+        TOTAL_TIMESTEPS = TOTAL_EPISODES * 24
+
+    if args.run_name is None and SEED == DEFAULT_SEED:
+        return
+
+    run_suffix = make_run_suffix(args.run_name, SEED)
+    MODEL_DIR = Path(f"./models/ddpg_yearly_single_{run_suffix}")
+    BEST_MODEL_DIR = MODEL_DIR / "best"
+    CHECKPOINT_DIR = MODEL_DIR / "checkpoints"
+    LOG_DIR = Path(f"./logs/ddpg_yearly_single_{run_suffix}")
+    TB_DIR = Path(f"./tb/ddpg_yearly_single_{run_suffix}")
+    RESULT_DIR = Path(f"./results/ddpg_yearly_training_{run_suffix}")
+    TRAINING_EXPORT_XLSX = RESULT_DIR / "ddpg_training_export.xlsx"
+    TRAINING_STEP_DETAIL_CSV = RESULT_DIR / "ddpg_training_step_detail.csv"
+    TRAINING_EPISODE_SUMMARY_CSV = RESULT_DIR / "episode_summary.csv"
+    TRAINING_RUNTIME_SUMMARY_JSON = RESULT_DIR / "training_runtime_summary.json"
 
 EPISODE_INFO_KEYS = (
     "episode_system_cost",
@@ -564,6 +613,13 @@ def set_random_seed(seed: int, np, th) -> None:
     th.manual_seed(seed)
     if th.cuda.is_available():
         th.cuda.manual_seed_all(seed)
+    if hasattr(th.backends, "cudnn"):
+        th.backends.cudnn.benchmark = False
+        th.backends.cudnn.deterministic = True
+    try:
+        th.use_deterministic_algorithms(True, warn_only=True)
+    except Exception as exc:
+        print(f"[startup] Warning: could not enable deterministic torch algorithms: {exc}")
 
 
 def resolve_sb3_device(th, requested_device: str) -> str:
@@ -586,14 +642,18 @@ def print_torch_runtime_summary(th, *, requested_device: str, resolved_device: s
     print(f"  resolved_device = {resolved_device}")
     print(f"  cuda_available = {th.cuda.is_available()}")
     print(f"  cuda_version = {th.version.cuda}")
+    print(f"  deterministic_algorithms = {th.are_deterministic_algorithms_enabled()}")
     if th.cuda.is_available():
         print(f"  cuda_device_count = {th.cuda.device_count()}")
         print(f"  cuda_device_name = {th.cuda.get_device_name(0)}")
+        print(f"  cudnn_version = {th.backends.cudnn.version()}")
     else:
         print("  note = CUDA unavailable, so DDPG will run on CPU.")
 
 
 def main() -> None:
+    args = parse_args()
+    apply_runtime_args(args)
     configure_stdio()
     try:
         excel_engine = preflight_check()
@@ -646,6 +706,8 @@ def main() -> None:
     probe_case = val_cases[0] if val_cases else train_cases[0]
     probe_ev_data = ev_provider(probe_case)
     probe_env = ParkIESEnv(cfg=cfg, ts_data=probe_case.ts_data, ev_data=probe_ev_data)
+    print(f"  run_name = {RUN_NAME}")
+    print(f"  seed = {SEED}")
     print("[startup] 本次训练关键配置 DDPG:")
     print(f"  reward_scale = {cfg.reward_scale}")
     print(f"  total_episodes = {TOTAL_EPISODES}")
